@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="photo.png" width="80" alt="WarpShift Icon" />
+<img src="frontend/public/photo.png" width="80" alt="WarpShift Icon" />
 
 # WarpShift
 
