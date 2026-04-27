@@ -508,7 +508,7 @@ export default function Home() {
           <div className="mt-3 space-y-2">
             {(result?.diff_annotations ?? []).map((annotation) => (
               <div key={annotation.id} className="glass-card rounded p-3">
-                <p className="text-[11px] font-mono text-zinc-400 mb-2 font-medium">
+                <p className="text-[11px] font-mono text-zinc-400 mb-2 font-medium break-all">
                   {annotation.file}:{annotation.line}
                 </p>
                 <div className="rounded bg-zinc-950/80 p-2 text-[11px] font-mono overflow-x-auto border border-zinc-800/50">
@@ -523,8 +523,8 @@ export default function Home() {
                     )
                   }
                 >
-                  <ChevronRightIcon className={`transition-transform duration-200 ${expandedInsight === annotation.id ? "rotate-90" : ""}`} />
-                  MigrateAI Insight
+                  <ChevronRightIcon className={`h-3 w-3 transition-transform duration-200 ${expandedInsight === annotation.id ? "rotate-90" : ""}`} />
+                  WarpShift Insight
                 </button>
                 {expandedInsight === annotation.id ? (
                   <div className="mt-2 rounded bg-[#8d59fe]/10 border border-[#8d59fe]/20 p-3 text-xs animate-slide-down">
