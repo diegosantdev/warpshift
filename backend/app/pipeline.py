@@ -932,6 +932,7 @@ def run_analysis(req: AnalysisRequest) -> AnalysisResult:
         runtime_status=runtime_status_value,
     )
 
+    real_pr_url = None
     if settings.github_real_pr:
         real_pr_url = _create_real_pr_if_enabled(
             repo_dir=repo_dir,
