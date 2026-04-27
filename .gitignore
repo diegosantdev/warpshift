@@ -1,0 +1,62 @@
+# WarpShift — Git Ignore
+
+# Nested git repos (prevent submodule issues)
+backend/tools/HIPIFY/
+frontend/.git
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment / Secrets
+.env
+.env.local
+.env.*.local
+*.env
+
+# Data / Cache (runtime generated)
+backend/data/repo-cache/
+backend/data/anchor-repo/
+backend/data/runs/
+backend/data/history.json
+backend/data/real_anchor_artifact.json
+
+# IDE
+.vscode/
+.idea/
+*.iml
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Docker
+*.tar
+
+# Build artifacts
+*.out
+warpshift_runtime_check.out
+migrateai_runtime_check.out
+data/benchmark_sample/saxpy
