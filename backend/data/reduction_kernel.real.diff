@@ -1,0 +1,2979 @@
+--- reduction_kernel.cu
++++ reduction_kernel.hip.cpp
+@@ -1,991 +1,1985 @@
+-/* Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- *  * Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- *  * Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *  * Neither the name of NVIDIA CORPORATION nor the names of its
+- *    contributors may be used to endorse or promote products derived
+- *    from this software without specific prior written permission.
+- *
+- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY
+- * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR
+- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+- * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
+- * OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+- * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-/*
+-    Parallel reduction kernels
+-*/
+-
+-#ifndef _REDUCE_KERNEL_H_
+-#define _REDUCE_KERNEL_H_
+-
+-#include <cooperative_groups.h>
+-#include <cooperative_groups/reduce.h>
+-#include <stdio.h>
+-
+-namespace cg = cooperative_groups;
+-
+-// Utility class used to avoid linker errors with extern
+-// unsized shared memory arrays with templated type
+-template <class T> struct SharedMemory
+-{
+-    __device__ inline operator T *()
+-    {
+-        extern __shared__ int __smem[];
+-        return (T *)__smem;
+-    }
+-
+-    __device__ inline operator const T *() const
+-    {
+-        extern __shared__ int __smem[];
+-        return (T *)__smem;
+-    }
+-};
+-
+-// specialize for double to avoid unaligned memory
+-// access compile errors
+-template <> struct SharedMemory<double>
+-{
+-    __device__ inline operator double *()
+-    {
+-        extern __shared__ double __smem_d[];
+-        return (double *)__smem_d;
+-    }
+-
+-    __device__ inline operator const double *() const
+-    {
+-        extern __shared__ double __smem_d[];
+-        return (double *)__smem_d;
+-    }
+-};
+-
+-template <class T> __device__ __forceinline__ T warpReduceSum(unsigned int mask, T mySum)
+-{
+-    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+-        mySum += __shfl_down_sync(mask, mySum, offset);
+-    }
+-    return mySum;
+-}
+-
+-#if __CUDA_ARCH__ >= 800
+-// Specialize warpReduceFunc for int inputs to use __reduce_add_sync intrinsic
+-// when on SM 8.0 or higher
+-template <> __device__ __forceinline__ int warpReduceSum<int>(unsigned int mask, int mySum)
+-{
+-    mySum = __reduce_add_sync(mask, mySum);
+-    return mySum;
+-}
+-#endif
+-
+-/*
+-    Parallel sum reduction using shared memory
+-    - takes log(n) steps for n input elements
+-    - uses n threads
+-    - only works for power-of-2 arrays
+-*/
+-
+-/* This reduction interleaves which threads are active by using the modulo
+-   operator.  This operator is very expensive on GPUs, and the interleaved
+-   inactivity means that no whole warps are active, which is also very
+-   inefficient */
+-template <class T> __global__ void reduce0(T *g_idata, T *g_odata, unsigned int n)
+-{
+-    // Handle to thread block group
+-    cg::thread_block cta   = cg::this_thread_block();
+-    T               *sdata = SharedMemory<T>();
+-
+-    // load shared mem
+-    unsigned int tid = threadIdx.x;
+-    unsigned int i   = blockIdx.x * blockDim.x + threadIdx.x;
+-
+-    sdata[tid] = (i < n) ? g_idata[i] : 0;
+-
+-    cg::sync(cta);
+-
+-    // do reduction in shared mem
+-    for (unsigned int s = 1; s < blockDim.x; s *= 2) {
+-        // modulo arithmetic is slow!
+-        if ((tid % (2 * s)) == 0) {
+-            sdata[tid] += sdata[tid + s];
+-        }
+-
+-        cg::sync(cta);
+-    }
+-
+-    // write result for this block to global mem
+-    if (tid == 0)
+-        g_odata[blockIdx.x] = sdata[0];
+-}
+-
+-/* This version uses contiguous threads, but its interleaved
+-   addressing results in many shared memory bank conflicts.
+-*/
+-template <class T> __global__ void reduce1(T *g_idata, T *g_odata, unsigned int n)
+-{
+-    // Handle to thread block group
+-    cg::thread_block cta   = cg::this_thread_block();
+-    T               *sdata = SharedMemory<T>();
+-
+-    // load shared mem
+-    unsigned int tid = threadIdx.x;
+-    unsigned int i   = blockIdx.x * blockDim.x + threadIdx.x;
+-
+-    sdata[tid] = (i < n) ? g_idata[i] : 0;
+-
+-    cg::sync(cta);
+-
+-    // do reduction in shared mem
+-    for (unsigned int s = 1; s < blockDim.x; s *= 2) {
+-        int index = 2 * s * tid;
+-
+-        if (index < blockDim.x) {
+-            sdata[index] += sdata[index + s];
+-        }
+-
+-        cg::sync(cta);
+-    }
+-
+-    // write result for this block to global mem
+-    if (tid == 0)
+-        g_odata[blockIdx.x] = sdata[0];
+-}
+-
+-/*
+-    This version uses sequential addressing -- no divergence or bank conflicts.
+-*/
+-template <class T> __global__ void reduce2(T *g_idata, T *g_odata, unsigned int n)
+-{
+-    // Handle to thread block group
+-    cg::thread_block cta   = cg::this_thread_block();
+-    T               *sdata = SharedMemory<T>();
+-
+-    // load shared mem
+-    unsigned int tid = threadIdx.x;
+-    unsigned int i   = blockIdx.x * blockDim.x + threadIdx.x;
+-
+-    sdata[tid] = (i < n) ? g_idata[i] : 0;
+-
+-    cg::sync(cta);
+-
+-    // do reduction in shared mem
+-    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+-        if (tid < s) {
+-            sdata[tid] += sdata[tid + s];
+-        }
+-
+-        cg::sync(cta);
+-    }
+-
+-    // write result for this block to global mem
+-    if (tid == 0)
+-        g_odata[blockIdx.x] = sdata[0];
+-}
+-
+-/*
+-    This version uses n/2 threads --
+-    it performs the first level of reduction when reading from global memory.
+-*/
+-template <class T> __global__ void reduce3(T *g_idata, T *g_odata, unsigned int n)
+-{
+-    // Handle to thread block group
+-    cg::thread_block cta   = cg::this_thread_block();
+-    T               *sdata = SharedMemory<T>();
+-
+-    // perform first level of reduction,
+-    // reading from global memory, writing to shared memory
+-    unsigned int tid = threadIdx.x;
+-    unsigned int i   = blockIdx.x * (blockDim.x * 2) + threadIdx.x;
+-
+-    T mySum = (i < n) ? g_idata[i] : 0;
+-
+-    if (i + blockDim.x < n)
+-        mySum += g_idata[i + blockDim.x];
+-
+-    sdata[tid] = mySum;
+-    cg::sync(cta);
+-
+-    // do reduction in shared mem
+-    for (unsigned int s = blockDim.x / 2; s > 0; s >>= 1) {
+-        if (tid < s) {
+-            sdata[tid] = mySum = mySum + sdata[tid + s];
+-        }
+-
+-        cg::sync(cta);
+-    }
+-
+-    // write result for this block to global mem
+-    if (tid == 0)
+-        g_odata[blockIdx.x] = mySum;
+-}
+-
+-/*
+-    This version uses the warp shuffle operation if available to reduce
+-    warp synchronization. When shuffle is not available the final warp's
+-    worth of work is unrolled to reduce looping overhead.
+-
+-    See
+-   http://devblogs.nvidia.com/parallelforall/faster-parallel-reductions-kepler/
+-    for additional information about using shuffle to perform a reduction
+-    within a warp.
+-
+-    Note, this kernel needs a minimum of 64*sizeof(T) bytes of shared memory.
+-    In other words if blockSize <= 32, allocate 64*sizeof(T) bytes.
+-    If blockSize > 32, allocate blockSize*sizeof(T) bytes.
+-*/
+-template <class T, unsigned int blockSize> __global__ void reduce4(T *g_idata, T *g_odata, unsigned int n)
+-{
+-    // Handle to thread block group
+-    cg::thread_block cta   = cg::this_thread_block();
+-    T               *sdata = SharedMemory<T>();
+-
+-    // perform first level of reduction,
+-    // reading from global memory, writing to shared memory
+-    unsigned int tid = threadIdx.x;
+-    unsigned int i   = blockIdx.x * (blockDim.x * 2) + threadIdx.x;
+-
+-    T mySum = (i < n) ? g_idata[i] : 0;
+-
+-    if (i + blockSize < n)
+-        mySum += g_idata[i + blockSize];
+-
+-    sdata[tid] = mySum;
+-    cg::sync(cta);
+-
+-    // do reduction in shared mem
+-    for (unsigned int s = blockDim.x / 2; s > 32; s >>= 1) {
+-        if (tid < s) {
+-            sdata[tid] = mySum = mySum + sdata[tid + s];
+-        }
+-
+-        cg::sync(cta);
+-    }
+-
+-    cg::thread_block_tile<32> tile32 = cg::tiled_partition<32>(cta);
+-
+-    if (cta.thread_rank() < 32) {
+-        // Fetch final intermediate sum from 2nd warp
+-        if (blockSize >= 64)
+-            mySum += sdata[tid + 32];
+-        // Reduce final warp using shuffle
+-        for (int offset = tile32.size() / 2; offset > 0; offset /= 2) {
+-            mySum += tile32.shfl_down(mySum, offset);
+-        }
+-    }
+-
+-    // write result for this block to global mem
+-    if (cta.thread_rank() == 0)
+-        g_odata[blockIdx.x] = mySum;
+-}
+-
+-/*
+-    This version is completely unrolled, unless warp shuffle is available, then
+-    shuffle is used within a loop.  It uses a template parameter to achieve
+-    optimal code for any (power of 2) number of threads.  This requires a switch
+-    statement in the host code to handle all the different thread block sizes at
+-    compile time. When shuffle is available, it is used to reduce warp
+-   synchronization.
+-
+-    Note, this kernel needs a minimum of 64*sizeof(T) bytes of shared memory.
+-    In other words if blockSize <= 32, allocate 64*sizeof(T) bytes.
+-    If blockSize > 32, allocate blockSize*sizeof(T) bytes.
+-*/
+-template <class T, unsigned int blockSize> __global__ void reduce5(T *g_idata, T *g_odata, unsigned int n)
+-{
+-    // Handle to thread block group
+-    cg::thread_block cta   = cg::this_thread_block();
+-    T               *sdata = SharedMemory<T>();
+-
+-    // perform first level of reduction,
+-    // reading from global memory, writing to shared memory
+-    unsigned int tid = threadIdx.x;
+-    unsigned int i   = blockIdx.x * (blockSize * 2) + threadIdx.x;
+-
+-    T mySum = (i < n) ? g_idata[i] : 0;
+-
+-    if (i + blockSize < n)
+-        mySum += g_idata[i + blockSize];
+-
+-    sdata[tid] = mySum;
+-    cg::sync(cta);
+-
+-    // do reduction in shared mem
+-    if ((blockSize >= 512) && (tid < 256)) {
+-        sdata[tid] = mySum = mySum + sdata[tid + 256];
+-    }
+-
+-    cg::sync(cta);
+-
+-    if ((blockSize >= 256) && (tid < 128)) {
+-        sdata[tid] = mySum = mySum + sdata[tid + 128];
+-    }
+-
+-    cg::sync(cta);
+-
+-    if ((blockSize >= 128) && (tid < 64)) {
+-        sdata[tid] = mySum = mySum + sdata[tid + 64];
+-    }
+-
+-    cg::sync(cta);
+-
+-    cg::thread_block_tile<32> tile32 = cg::tiled_partition<32>(cta);
+-
+-    if (cta.thread_rank() < 32) {
+-        // Fetch final intermediate sum from 2nd warp
+-        if (blockSize >= 64)
+-            mySum += sdata[tid + 32];
+-        // Reduce final warp using shuffle
+-        for (int offset = tile32.size() / 2; offset > 0; offset /= 2) {
+-            mySum += tile32.shfl_down(mySum, offset);
+-        }
+-    }
+-
+-    // write result for this block to global mem
+-    if (cta.thread_rank() == 0)
+-        g_odata[blockIdx.x] = mySum;
+-}
+-
+-/*
+-    This version adds multiple elements per thread sequentially.  This reduces
+-   the overall cost of the algorithm while keeping the work complexity O(n) and
+-   the step complexity O(log n). (Brent's Theorem optimization)
+-
+-    Note, this kernel needs a minimum of 64*sizeof(T) bytes of shared memory.
+-    In other words if blockSize <= 32, allocate 64*sizeof(T) bytes.
+-    If blockSize > 32, allocate blockSize*sizeof(T) bytes.
+-*/
+-template <class T, unsigned int blockSize, bool nIsPow2> __global__ void reduce6(T *g_idata, T *g_odata, unsigned int n)
+-{
+-    // Handle to thread block group
+-    cg::thread_block cta   = cg::this_thread_block();
+-    T               *sdata = SharedMemory<T>();
+-
+-    // perform first level of reduction,
+-    // reading from global memory, writing to shared memory
+-    unsigned int tid      = threadIdx.x;
+-    unsigned int gridSize = blockSize * gridDim.x;
+-
+-    T mySum = 0;
+-
+-    // we reduce multiple elements per thread.  The number is determined by the
+-    // number of active thread blocks (via gridDim).  More blocks will result
+-    // in a larger gridSize and therefore fewer elements per thread
+-    if (nIsPow2) {
+-        unsigned int i = blockIdx.x * blockSize * 2 + threadIdx.x;
+-        gridSize       = gridSize << 1;
+-
+-        while (i < n) {
+-            mySum += g_idata[i];
+-            // ensure we don't read out of bounds -- this is optimized away for
+-            // powerOf2 sized arrays
+-            if ((i + blockSize) < n) {
+-                mySum += g_idata[i + blockSize];
+-            }
+-            i += gridSize;
+-        }
+-    }
+-    else {
+-        unsigned int i = blockIdx.x * blockSize + threadIdx.x;
+-        while (i < n) {
+-            mySum += g_idata[i];
+-            i += gridSize;
+-        }
+-    }
+-
+-    // each thread puts its local sum into shared memory
+-    sdata[tid] = mySum;
+-    cg::sync(cta);
+-
+-    // do reduction in shared mem
+-    if ((blockSize >= 512) && (tid < 256)) {
+-        sdata[tid] = mySum = mySum + sdata[tid + 256];
+-    }
+-
+-    cg::sync(cta);
+-
+-    if ((blockSize >= 256) && (tid < 128)) {
+-        sdata[tid] = mySum = mySum + sdata[tid + 128];
+-    }
+-
+-    cg::sync(cta);
+-
+-    if ((blockSize >= 128) && (tid < 64)) {
+-        sdata[tid] = mySum = mySum + sdata[tid + 64];
+-    }
+-
+-    cg::sync(cta);
+-
+-    cg::thread_block_tile<32> tile32 = cg::tiled_partition<32>(cta);
+-
+-    if (cta.thread_rank() < 32) {
+-        // Fetch final intermediate sum from 2nd warp
+-        if (blockSize >= 64)
+-            mySum += sdata[tid + 32];
+-        // Reduce final warp using shuffle
+-        for (int offset = tile32.size() / 2; offset > 0; offset /= 2) {
+-            mySum += tile32.shfl_down(mySum, offset);
+-        }
+-    }
+-
+-    // write result for this block to global mem
+-    if (cta.thread_rank() == 0)
+-        g_odata[blockIdx.x] = mySum;
+-}
+-
+-template <typename T, unsigned int blockSize, bool nIsPow2>
+-__global__ void reduce7(const T *__restrict__ g_idata, T *__restrict__ g_odata, unsigned int n)
+-{
+-    T *sdata = SharedMemory<T>();
+-
+-    // perform first level of reduction,
+-    // reading from global memory, writing to shared memory
+-    unsigned int tid        = threadIdx.x;
+-    unsigned int gridSize   = blockSize * gridDim.x;
+-    unsigned int maskLength = (blockSize & 31); // 31 = warpSize-1
+-    maskLength              = (maskLength > 0) ? (32 - maskLength) : maskLength;
+-    const unsigned int mask = (0xffffffff) >> maskLength;
+-
+-    T mySum = 0;
+-
+-    // we reduce multiple elements per thread.  The number is determined by the
+-    // number of active thread blocks (via gridDim).  More blocks will result
+-    // in a larger gridSize and therefore fewer elements per thread
+-    if (nIsPow2) {
+-        unsigned int i = blockIdx.x * blockSize * 2 + threadIdx.x;
+-        gridSize       = gridSize << 1;
+-
+-        while (i < n) {
+-            mySum += g_idata[i];
+-            // ensure we don't read out of bounds -- this is optimized away for
+-            // powerOf2 sized arrays
+-            if ((i + blockSize) < n) {
+-                mySum += g_idata[i + blockSize];
+-            }
+-            i += gridSize;
+-        }
+-    }
+-    else {
+-        unsigned int i = blockIdx.x * blockSize + threadIdx.x;
+-        while (i < n) {
+-            mySum += g_idata[i];
+-            i += gridSize;
+-        }
+-    }
+-
+-    // Reduce within warp using shuffle or reduce_add if T==int & CUDA_ARCH ==
+-    // SM 8.0
+-    mySum = warpReduceSum<T>(mask, mySum);
+-
+-    // each thread puts its local sum into shared memory
+-    if ((tid % warpSize) == 0) {
+-        sdata[tid / warpSize] = mySum;
+-    }
+-
+-    __syncthreads();
+-
+-    const unsigned int shmem_extent  = (blockSize / warpSize) > 0 ? (blockSize / warpSize) : 1;
+-    const unsigned int ballot_result = __ballot_sync(mask, tid < shmem_extent);
+-    if (tid < shmem_extent) {
+-        mySum = sdata[tid];
+-        // Reduce final warp using shuffle or reduce_add if T==int & CUDA_ARCH ==
+-        // SM 8.0
+-        mySum = warpReduceSum<T>(ballot_result, mySum);
+-    }
+-
+-    // write result for this block to global mem
+-    if (tid == 0) {
+-        g_odata[blockIdx.x] = mySum;
+-    }
+-}
+-
+-// Performs a reduction step and updates numTotal with how many are remaining
+-template <typename T, typename Group> __device__ T cg_reduce_n(T in, Group &threads)
+-{
+-    return cg::reduce(threads, in, cg::plus<T>());
+-}
+-
+-template <class T> __global__ void cg_reduce(T *g_idata, T *g_odata, unsigned int n)
+-{
+-    // Shared memory for intermediate steps
+-    T *sdata = SharedMemory<T>();
+-    // Handle to thread block group
+-    cg::thread_block cta = cg::this_thread_block();
+-    // Handle to tile in thread block
+-    cg::thread_block_tile<32> tile = cg::tiled_partition<32>(cta);
+-
+-    unsigned int ctaSize     = cta.size();
+-    unsigned int numCtas     = gridDim.x;
+-    unsigned int threadRank  = cta.thread_rank();
+-    unsigned int threadIndex = (blockIdx.x * ctaSize) + threadRank;
+-
+-    T threadVal = 0;
+-    {
+-        unsigned int i           = threadIndex;
+-        unsigned int indexStride = (numCtas * ctaSize);
+-        while (i < n) {
+-            threadVal += g_idata[i];
+-            i += indexStride;
+-        }
+-        sdata[threadRank] = threadVal;
+-    }
+-
+-    // Wait for all tiles to finish and reduce within CTA
+-    {
+-        unsigned int ctaSteps = tile.meta_group_size();
+-        unsigned int ctaIndex = ctaSize >> 1;
+-        while (ctaIndex >= 32) {
+-            cta.sync();
+-            if (threadRank < ctaIndex) {
+-                threadVal += sdata[threadRank + ctaIndex];
+-                sdata[threadRank] = threadVal;
+-            }
+-            ctaSteps >>= 1;
+-            ctaIndex >>= 1;
+-        }
+-    }
+-
+-    // Shuffle redux instead of smem redux
+-    {
+-        cta.sync();
+-        if (tile.meta_group_rank() == 0) {
+-            threadVal = cg_reduce_n(threadVal, tile);
+-        }
+-    }
+-
+-    if (threadRank == 0)
+-        g_odata[blockIdx.x] = threadVal;
+-}
+-
+-template <class T, size_t BlockSize, size_t MultiWarpGroupSize>
+-__global__ void multi_warp_cg_reduce(T *g_idata, T *g_odata, unsigned int n)
+-{
+-    // Shared memory for intermediate steps
+-    T         *sdata = SharedMemory<T>();
+-    __shared__ cg::block_tile_memory<BlockSize> scratch;
+-
+-    // Handle to thread block group
+-    auto cta = cg::this_thread_block(scratch);
+-    // Handle to multiWarpTile in thread block
+-    auto multiWarpTile = cg::tiled_partition<MultiWarpGroupSize>(cta);
+-
+-    unsigned int gridSize  = BlockSize * gridDim.x;
+-    T            threadVal = 0;
+-
+-    // we reduce multiple elements per thread.  The number is determined by the
+-    // number of active thread blocks (via gridDim).  More blocks will result
+-    // in a larger gridSize and therefore fewer elements per thread
+-    int nIsPow2 = !(n & n - 1);
+-    if (nIsPow2) {
+-        unsigned int i = blockIdx.x * BlockSize * 2 + threadIdx.x;
+-        gridSize       = gridSize << 1;
+-
+-        while (i < n) {
+-            threadVal += g_idata[i];
+-            // ensure we don't read out of bounds -- this is optimized away for
+-            // powerOf2 sized arrays
+-            if ((i + BlockSize) < n) {
+-                threadVal += g_idata[i + blockDim.x];
+-            }
+-            i += gridSize;
+-        }
+-    }
+-    else {
+-        unsigned int i = blockIdx.x * BlockSize + threadIdx.x;
+-        while (i < n) {
+-            threadVal += g_idata[i];
+-            i += gridSize;
+-        }
+-    }
+-
+-    threadVal = cg_reduce_n(threadVal, multiWarpTile);
+-
+-    if (multiWarpTile.thread_rank() == 0) {
+-        sdata[multiWarpTile.meta_group_rank()] = threadVal;
+-    }
+-    cg::sync(cta);
+-
+-    if (threadIdx.x == 0) {
+-        threadVal = 0;
+-        for (int i = 0; i < multiWarpTile.meta_group_size(); i++) {
+-            threadVal += sdata[i];
+-        }
+-        g_odata[blockIdx.x] = threadVal;
+-    }
+-}
+-
+-extern "C" bool isPow2(unsigned int x);
+-
+-////////////////////////////////////////////////////////////////////////////////
+-// Wrapper function for kernel launch
+-////////////////////////////////////////////////////////////////////////////////
+-template <class T> void reduce(int size, int threads, int blocks, int whichKernel, T *d_idata, T *d_odata)
+-{
+-    dim3 dimBlock(threads, 1, 1);
+-    dim3 dimGrid(blocks, 1, 1);
+-
+-    // when there is only one warp per block, we need to allocate two warps
+-    // worth of shared memory so that we don't index shared memory out of bounds
+-    int smemSize = (threads <= 32) ? 2 * threads * sizeof(T) : threads * sizeof(T);
+-
+-    // as kernel 9 - multi_warp_cg_reduce cannot work for more than 64 threads
+-    // we choose to set kernel 7 for this purpose.
+-    if (threads < 64 && whichKernel == 9) {
+-        whichKernel = 7;
+-    }
+-
+-    // choose which of the optimized versions of reduction to launch
+-    switch (whichKernel) {
+-    case 0:
+-        reduce0<T><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-        break;
+-
+-    case 1:
+-        reduce1<T><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-        break;
+-
+-    case 2:
+-        reduce2<T><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-        break;
+-
+-    case 3:
+-        reduce3<T><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-        break;
+-
+-    case 4:
+-        switch (threads) {
+-        case 512:
+-            reduce4<T, 512><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 256:
+-            reduce4<T, 256><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 128:
+-            reduce4<T, 128><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 64:
+-            reduce4<T, 64><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 32:
+-            reduce4<T, 32><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 16:
+-            reduce4<T, 16><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 8:
+-            reduce4<T, 8><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 4:
+-            reduce4<T, 4><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 2:
+-            reduce4<T, 2><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 1:
+-            reduce4<T, 1><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-        }
+-
+-        break;
+-
+-    case 5:
+-        switch (threads) {
+-        case 512:
+-            reduce5<T, 512><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 256:
+-            reduce5<T, 256><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 128:
+-            reduce5<T, 128><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 64:
+-            reduce5<T, 64><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 32:
+-            reduce5<T, 32><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 16:
+-            reduce5<T, 16><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 8:
+-            reduce5<T, 8><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 4:
+-            reduce5<T, 4><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 2:
+-            reduce5<T, 2><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 1:
+-            reduce5<T, 1><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-        }
+-
+-        break;
+-
+-    case 6:
+-        if (isPow2(size)) {
+-            switch (threads) {
+-            case 512:
+-                reduce6<T, 512, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 256:
+-                reduce6<T, 256, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 128:
+-                reduce6<T, 128, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 64:
+-                reduce6<T, 64, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 32:
+-                reduce6<T, 32, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 16:
+-                reduce6<T, 16, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 8:
+-                reduce6<T, 8, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 4:
+-                reduce6<T, 4, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 2:
+-                reduce6<T, 2, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 1:
+-                reduce6<T, 1, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-            }
+-        }
+-        else {
+-            switch (threads) {
+-            case 512:
+-                reduce6<T, 512, false><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 256:
+-                reduce6<T, 256, false><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 128:
+-                reduce6<T, 128, false><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 64:
+-                reduce6<T, 64, false><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 32:
+-                reduce6<T, 32, false><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 16:
+-                reduce6<T, 16, false><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 8:
+-                reduce6<T, 8, false><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 4:
+-                reduce6<T, 4, false><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 2:
+-                reduce6<T, 2, false><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 1:
+-                reduce6<T, 1, false><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-            }
+-        }
+-
+-        break;
+-
+-    case 7:
+-        // For reduce7 kernel we require only blockSize/warpSize
+-        // number of elements in shared memory
+-        smemSize = ((threads / 32) + 1) * sizeof(T);
+-        if (isPow2(size)) {
+-            switch (threads) {
+-            case 1024:
+-                reduce7<T, 1024, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-            case 512:
+-                reduce7<T, 512, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 256:
+-                reduce7<T, 256, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 128:
+-                reduce7<T, 128, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 64:
+-                reduce7<T, 64, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 32:
+-                reduce7<T, 32, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 16:
+-                reduce7<T, 16, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 8:
+-                reduce7<T, 8, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 4:
+-                reduce7<T, 4, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 2:
+-                reduce7<T, 2, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 1:
+-                reduce7<T, 1, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-            }
+-        }
+-        else {
+-            switch (threads) {
+-            case 1024:
+-                reduce7<T, 1024, true><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-            case 512:
+-                reduce7<T, 512, false><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 256:
+-                reduce7<T, 256, false><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 128:
+-                reduce7<T, 128, false><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 64:
+-                reduce7<T, 64, false><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 32:
+-                reduce7<T, 32, false><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 16:
+-                reduce7<T, 16, false><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 8:
+-                reduce7<T, 8, false><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 4:
+-                reduce7<T, 4, false><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 2:
+-                reduce7<T, 2, false><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-
+-            case 1:
+-                reduce7<T, 1, false><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-                break;
+-            }
+-        }
+-
+-        break;
+-    case 8:
+-        cg_reduce<T><<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-        break;
+-    case 9:
+-        constexpr int numOfMultiWarpGroups = 2;
+-        smemSize                           = numOfMultiWarpGroups * sizeof(T);
+-        switch (threads) {
+-        case 1024:
+-            multi_warp_cg_reduce<T, 1024, 1024 / numOfMultiWarpGroups>
+-                <<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 512:
+-            multi_warp_cg_reduce<T, 512, 512 / numOfMultiWarpGroups>
+-                <<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 256:
+-            multi_warp_cg_reduce<T, 256, 256 / numOfMultiWarpGroups>
+-                <<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 128:
+-            multi_warp_cg_reduce<T, 128, 128 / numOfMultiWarpGroups>
+-                <<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        case 64:
+-            multi_warp_cg_reduce<T, 64, 64 / numOfMultiWarpGroups>
+-                <<<dimGrid, dimBlock, smemSize>>>(d_idata, d_odata, size);
+-            break;
+-
+-        default:
+-            printf("thread block size of < 64 is not supported for this kernel\n");
+-            break;
+-        }
+-        break;
+-    }
+-}
+-
+-// Instantiate the reduction function for 3 types
+-template void reduce<int>(int size, int threads, int blocks, int whichKernel, int *d_idata, int *d_odata);
+-
+-template void reduce<float>(int size, int threads, int blocks, int whichKernel, float *d_idata, float *d_odata);
+-
+-template void reduce<double>(int size, int threads, int blocks, int whichKernel, double *d_idata, double *d_odata);
+-
+-#endif // #ifndef _REDUCE_KERNEL_H_
++# i n c l u d e   " h i p / h i p _ r u n t i m e . h " 
++ 
++ / *   C o p y r i g h t   ( c )   2 0 2 2 ,   N V I D I A   C O R P O R A T I O N .   A l l   r i g h t s   r e s e r v e d . 
++ 
++   * 
++ 
++   *   R e d i s t r i b u t i o n   a n d   u s e   i n   s o u r c e   a n d   b i n a r y   f o r m s ,   w i t h   o r   w i t h o u t 
++ 
++   *   m o d i f i c a t i o n ,   a r e   p e r m i t t e d   p r o v i d e d   t h a t   t h e   f o l l o w i n g   c o n d i t i o n s 
++ 
++   *   a r e   m e t : 
++ 
++   *     *   R e d i s t r i b u t i o n s   o f   s o u r c e   c o d e   m u s t   r e t a i n   t h e   a b o v e   c o p y r i g h t 
++ 
++   *         n o t i c e ,   t h i s   l i s t   o f   c o n d i t i o n s   a n d   t h e   f o l l o w i n g   d i s c l a i m e r . 
++ 
++   *     *   R e d i s t r i b u t i o n s   i n   b i n a r y   f o r m   m u s t   r e p r o d u c e   t h e   a b o v e   c o p y r i g h t 
++ 
++   *         n o t i c e ,   t h i s   l i s t   o f   c o n d i t i o n s   a n d   t h e   f o l l o w i n g   d i s c l a i m e r   i n   t h e 
++ 
++   *         d o c u m e n t a t i o n   a n d / o r   o t h e r   m a t e r i a l s   p r o v i d e d   w i t h   t h e   d i s t r i b u t i o n . 
++ 
++   *     *   N e i t h e r   t h e   n a m e   o f   N V I D I A   C O R P O R A T I O N   n o r   t h e   n a m e s   o f   i t s 
++ 
++   *         c o n t r i b u t o r s   m a y   b e   u s e d   t o   e n d o r s e   o r   p r o m o t e   p r o d u c t s   d e r i v e d 
++ 
++   *         f r o m   t h i s   s o f t w a r e   w i t h o u t   s p e c i f i c   p r i o r   w r i t t e n   p e r m i s s i o n . 
++ 
++   * 
++ 
++   *   T H I S   S O F T W A R E   I S   P R O V I D E D   B Y   T H E   C O P Y R I G H T   H O L D E R S   ` ` A S   I S ' '   A N D   A N Y 
++ 
++   *   E X P R E S S   O R   I M P L I E D   W A R R A N T I E S ,   I N C L U D I N G ,   B U T   N O T   L I M I T E D   T O ,   T H E 
++ 
++   *   I M P L I E D   W A R R A N T I E S   O F   M E R C H A N T A B I L I T Y   A N D   F I T N E S S   F O R   A   P A R T I C U L A R 
++ 
++   *   P U R P O S E   A R E   D I S C L A I M E D .     I N   N O   E V E N T   S H A L L   T H E   C O P Y R I G H T   O W N E R   O R 
++ 
++   *   C O N T R I B U T O R S   B E   L I A B L E   F O R   A N Y   D I R E C T ,   I N D I R E C T ,   I N C I D E N T A L ,   S P E C I A L , 
++ 
++   *   E X E M P L A R Y ,   O R   C O N S E Q U E N T I A L   D A M A G E S   ( I N C L U D I N G ,   B U T   N O T   L I M I T E D   T O , 
++ 
++   *   P R O C U R E M E N T   O F   S U B S T I T U T E   G O O D S   O R   S E R V I C E S ;   L O S S   O F   U S E ,   D A T A ,   O R 
++ 
++   *   P R O F I T S ;   O R   B U S I N E S S   I N T E R R U P T I O N )   H O W E V E R   C A U S E D   A N D   O N   A N Y   T H E O R Y 
++ 
++   *   O F   L I A B I L I T Y ,   W H E T H E R   I N   C O N T R A C T ,   S T R I C T   L I A B I L I T Y ,   O R   T O R T 
++ 
++   *   ( I N C L U D I N G   N E G L I G E N C E   O R   O T H E R W I S E )   A R I S I N G   I N   A N Y   W A Y   O U T   O F   T H E   U S E 
++ 
++   *   O F   T H I S   S O F T W A R E ,   E V E N   I F   A D V I S E D   O F   T H E   P O S S I B I L I T Y   O F   S U C H   D A M A G E . 
++ 
++   * / 
++ 
++ 
++ 
++ / * 
++ 
++         P a r a l l e l   r e d u c t i o n   k e r n e l s 
++ 
++ * / 
++ 
++ 
++ 
++ # i f n d e f   _ R E D U C E _ K E R N E L _ H _ 
++ 
++ # d e f i n e   _ R E D U C E _ K E R N E L _ H _ 
++ 
++ 
++ 
++ # i n c l u d e   < h i p / h i p _ c o o p e r a t i v e _ g r o u p s . h > 
++ 
++ # i n c l u d e   < c o o p e r a t i v e _ g r o u p s / r e d u c e . h > 
++ 
++ # i n c l u d e   < s t d i o . h > 
++ 
++ 
++ 
++ n a m e s p a c e   c g   =   c o o p e r a t i v e _ g r o u p s ; 
++ 
++ 
++ 
++ / /   U t i l i t y   c l a s s   u s e d   t o   a v o i d   l i n k e r   e r r o r s   w i t h   e x t e r n 
++ 
++ / /   u n s i z e d   s h a r e d   m e m o r y   a r r a y s   w i t h   t e m p l a t e d   t y p e 
++ 
++ t e m p l a t e   < c l a s s   T >   s t r u c t   S h a r e d M e m o r y 
++ 
++ { 
++ 
++         _ _ d e v i c e _ _   i n l i n e   o p e r a t o r   T   * ( ) 
++ 
++         { 
++ 
++                 e x t e r n   _ _ s h a r e d _ _   i n t   _ _ s m e m [ ] ; 
++ 
++                 r e t u r n   ( T   * ) _ _ s m e m ; 
++ 
++         } 
++ 
++ 
++ 
++         _ _ d e v i c e _ _   i n l i n e   o p e r a t o r   c o n s t   T   * ( )   c o n s t 
++ 
++         { 
++ 
++                 e x t e r n   _ _ s h a r e d _ _   i n t   _ _ s m e m [ ] ; 
++ 
++                 r e t u r n   ( T   * ) _ _ s m e m ; 
++ 
++         } 
++ 
++ } ; 
++ 
++ 
++ 
++ / /   s p e c i a l i z e   f o r   d o u b l e   t o   a v o i d   u n a l i g n e d   m e m o r y 
++ 
++ / /   a c c e s s   c o m p i l e   e r r o r s 
++ 
++ t e m p l a t e   < >   s t r u c t   S h a r e d M e m o r y < d o u b l e > 
++ 
++ { 
++ 
++         _ _ d e v i c e _ _   i n l i n e   o p e r a t o r   d o u b l e   * ( ) 
++ 
++         { 
++ 
++                 e x t e r n   _ _ s h a r e d _ _   d o u b l e   _ _ s m e m _ d [ ] ; 
++ 
++                 r e t u r n   ( d o u b l e   * ) _ _ s m e m _ d ; 
++ 
++         } 
++ 
++ 
++ 
++         _ _ d e v i c e _ _   i n l i n e   o p e r a t o r   c o n s t   d o u b l e   * ( )   c o n s t 
++ 
++         { 
++ 
++                 e x t e r n   _ _ s h a r e d _ _   d o u b l e   _ _ s m e m _ d [ ] ; 
++ 
++                 r e t u r n   ( d o u b l e   * ) _ _ s m e m _ d ; 
++ 
++         } 
++ 
++ } ; 
++ 
++ 
++ 
++ t e m p l a t e   < c l a s s   T >   _ _ d e v i c e _ _   _ _ f o r c e i n l i n e _ _   T   w a r p R e d u c e S u m ( u n s i g n e d   i n t   m a s k ,   T   m y S u m ) 
++ 
++ { 
++ 
++         f o r   ( i n t   o f f s e t   =   w a r p S i z e   /   2 ;   o f f s e t   >   0 ;   o f f s e t   / =   2 )   { 
++ 
++                 m y S u m   + =   _ _ s h f l _ d o w n _ s y n c ( m a s k ,   m y S u m ,   o f f s e t ) ; 
++ 
++         } 
++ 
++         r e t u r n   m y S u m ; 
++ 
++ } 
++ 
++ 
++ 
++ # i f   _ _ C U D A _ A R C H _ _   > =   8 0 0 
++ 
++ / /   S p e c i a l i z e   w a r p R e d u c e F u n c   f o r   i n t   i n p u t s   t o   u s e   _ _ r e d u c e _ a d d _ s y n c   i n t r i n s i c 
++ 
++ / /   w h e n   o n   S M   8 . 0   o r   h i g h e r 
++ 
++ t e m p l a t e   < >   _ _ d e v i c e _ _   _ _ f o r c e i n l i n e _ _   i n t   w a r p R e d u c e S u m < i n t > ( u n s i g n e d   i n t   m a s k ,   i n t   m y S u m ) 
++ 
++ { 
++ 
++         m y S u m   =   _ _ r e d u c e _ a d d _ s y n c ( m a s k ,   m y S u m ) ; 
++ 
++         r e t u r n   m y S u m ; 
++ 
++ } 
++ 
++ # e n d i f 
++ 
++ 
++ 
++ / * 
++ 
++         P a r a l l e l   s u m   r e d u c t i o n   u s i n g   s h a r e d   m e m o r y 
++ 
++         -   t a k e s   l o g ( n )   s t e p s   f o r   n   i n p u t   e l e m e n t s 
++ 
++         -   u s e s   n   t h r e a d s 
++ 
++         -   o n l y   w o r k s   f o r   p o w e r - o f - 2   a r r a y s 
++ 
++ * / 
++ 
++ 
++ 
++ / *   T h i s   r e d u c t i o n   i n t e r l e a v e s   w h i c h   t h r e a d s   a r e   a c t i v e   b y   u s i n g   t h e   m o d u l o 
++ 
++       o p e r a t o r .     T h i s   o p e r a t o r   i s   v e r y   e x p e n s i v e   o n   G P U s ,   a n d   t h e   i n t e r l e a v e d 
++ 
++       i n a c t i v i t y   m e a n s   t h a t   n o   w h o l e   w a r p s   a r e   a c t i v e ,   w h i c h   i s   a l s o   v e r y 
++ 
++       i n e f f i c i e n t   * / 
++ 
++ t e m p l a t e   < c l a s s   T >   _ _ g l o b a l _ _   v o i d   r e d u c e 0 ( T   * g _ i d a t a ,   T   * g _ o d a t a ,   u n s i g n e d   i n t   n ) 
++ 
++ { 
++ 
++         / /   H a n d l e   t o   t h r e a d   b l o c k   g r o u p 
++ 
++         c g : : t h r e a d _ b l o c k   c t a       =   c g : : t h i s _ t h r e a d _ b l o c k ( ) ; 
++ 
++         T                               * s d a t a   =   S h a r e d M e m o r y < T > ( ) ; 
++ 
++ 
++ 
++         / /   l o a d   s h a r e d   m e m 
++ 
++         u n s i g n e d   i n t   t i d   =   t h r e a d I d x . x ; 
++ 
++         u n s i g n e d   i n t   i       =   b l o c k I d x . x   *   b l o c k D i m . x   +   t h r e a d I d x . x ; 
++ 
++ 
++ 
++         s d a t a [ t i d ]   =   ( i   <   n )   ?   g _ i d a t a [ i ]   :   0 ; 
++ 
++ 
++ 
++         c g : : s y n c ( c t a ) ; 
++ 
++ 
++ 
++         / /   d o   r e d u c t i o n   i n   s h a r e d   m e m 
++ 
++         f o r   ( u n s i g n e d   i n t   s   =   1 ;   s   <   b l o c k D i m . x ;   s   * =   2 )   { 
++ 
++                 / /   m o d u l o   a r i t h m e t i c   i s   s l o w ! 
++ 
++                 i f   ( ( t i d   %   ( 2   *   s ) )   = =   0 )   { 
++ 
++                         s d a t a [ t i d ]   + =   s d a t a [ t i d   +   s ] ; 
++ 
++                 } 
++ 
++ 
++ 
++                 c g : : s y n c ( c t a ) ; 
++ 
++         } 
++ 
++ 
++ 
++         / /   w r i t e   r e s u l t   f o r   t h i s   b l o c k   t o   g l o b a l   m e m 
++ 
++         i f   ( t i d   = =   0 ) 
++ 
++                 g _ o d a t a [ b l o c k I d x . x ]   =   s d a t a [ 0 ] ; 
++ 
++ } 
++ 
++ 
++ 
++ / *   T h i s   v e r s i o n   u s e s   c o n t i g u o u s   t h r e a d s ,   b u t   i t s   i n t e r l e a v e d 
++ 
++       a d d r e s s i n g   r e s u l t s   i n   m a n y   s h a r e d   m e m o r y   b a n k   c o n f l i c t s . 
++ 
++ * / 
++ 
++ t e m p l a t e   < c l a s s   T >   _ _ g l o b a l _ _   v o i d   r e d u c e 1 ( T   * g _ i d a t a ,   T   * g _ o d a t a ,   u n s i g n e d   i n t   n ) 
++ 
++ { 
++ 
++         / /   H a n d l e   t o   t h r e a d   b l o c k   g r o u p 
++ 
++         c g : : t h r e a d _ b l o c k   c t a       =   c g : : t h i s _ t h r e a d _ b l o c k ( ) ; 
++ 
++         T                               * s d a t a   =   S h a r e d M e m o r y < T > ( ) ; 
++ 
++ 
++ 
++         / /   l o a d   s h a r e d   m e m 
++ 
++         u n s i g n e d   i n t   t i d   =   t h r e a d I d x . x ; 
++ 
++         u n s i g n e d   i n t   i       =   b l o c k I d x . x   *   b l o c k D i m . x   +   t h r e a d I d x . x ; 
++ 
++ 
++ 
++         s d a t a [ t i d ]   =   ( i   <   n )   ?   g _ i d a t a [ i ]   :   0 ; 
++ 
++ 
++ 
++         c g : : s y n c ( c t a ) ; 
++ 
++ 
++ 
++         / /   d o   r e d u c t i o n   i n   s h a r e d   m e m 
++ 
++         f o r   ( u n s i g n e d   i n t   s   =   1 ;   s   <   b l o c k D i m . x ;   s   * =   2 )   { 
++ 
++                 i n t   i n d e x   =   2   *   s   *   t i d ; 
++ 
++ 
++ 
++                 i f   ( i n d e x   <   b l o c k D i m . x )   { 
++ 
++                         s d a t a [ i n d e x ]   + =   s d a t a [ i n d e x   +   s ] ; 
++ 
++                 } 
++ 
++ 
++ 
++                 c g : : s y n c ( c t a ) ; 
++ 
++         } 
++ 
++ 
++ 
++         / /   w r i t e   r e s u l t   f o r   t h i s   b l o c k   t o   g l o b a l   m e m 
++ 
++         i f   ( t i d   = =   0 ) 
++ 
++                 g _ o d a t a [ b l o c k I d x . x ]   =   s d a t a [ 0 ] ; 
++ 
++ } 
++ 
++ 
++ 
++ / * 
++ 
++         T h i s   v e r s i o n   u s e s   s e q u e n t i a l   a d d r e s s i n g   - -   n o   d i v e r g e n c e   o r   b a n k   c o n f l i c t s . 
++ 
++ * / 
++ 
++ t e m p l a t e   < c l a s s   T >   _ _ g l o b a l _ _   v o i d   r e d u c e 2 ( T   * g _ i d a t a ,   T   * g _ o d a t a ,   u n s i g n e d   i n t   n ) 
++ 
++ { 
++ 
++         / /   H a n d l e   t o   t h r e a d   b l o c k   g r o u p 
++ 
++         c g : : t h r e a d _ b l o c k   c t a       =   c g : : t h i s _ t h r e a d _ b l o c k ( ) ; 
++ 
++         T                               * s d a t a   =   S h a r e d M e m o r y < T > ( ) ; 
++ 
++ 
++ 
++         / /   l o a d   s h a r e d   m e m 
++ 
++         u n s i g n e d   i n t   t i d   =   t h r e a d I d x . x ; 
++ 
++         u n s i g n e d   i n t   i       =   b l o c k I d x . x   *   b l o c k D i m . x   +   t h r e a d I d x . x ; 
++ 
++ 
++ 
++         s d a t a [ t i d ]   =   ( i   <   n )   ?   g _ i d a t a [ i ]   :   0 ; 
++ 
++ 
++ 
++         c g : : s y n c ( c t a ) ; 
++ 
++ 
++ 
++         / /   d o   r e d u c t i o n   i n   s h a r e d   m e m 
++ 
++         f o r   ( u n s i g n e d   i n t   s   =   b l o c k D i m . x   /   2 ;   s   >   0 ;   s   > > =   1 )   { 
++ 
++                 i f   ( t i d   <   s )   { 
++ 
++                         s d a t a [ t i d ]   + =   s d a t a [ t i d   +   s ] ; 
++ 
++                 } 
++ 
++ 
++ 
++                 c g : : s y n c ( c t a ) ; 
++ 
++         } 
++ 
++ 
++ 
++         / /   w r i t e   r e s u l t   f o r   t h i s   b l o c k   t o   g l o b a l   m e m 
++ 
++         i f   ( t i d   = =   0 ) 
++ 
++                 g _ o d a t a [ b l o c k I d x . x ]   =   s d a t a [ 0 ] ; 
++ 
++ } 
++ 
++ 
++ 
++ / * 
++ 
++         T h i s   v e r s i o n   u s e s   n / 2   t h r e a d s   - - 
++ 
++         i t   p e r f o r m s   t h e   f i r s t   l e v e l   o f   r e d u c t i o n   w h e n   r e a d i n g   f r o m   g l o b a l   m e m o r y . 
++ 
++ * / 
++ 
++ t e m p l a t e   < c l a s s   T >   _ _ g l o b a l _ _   v o i d   r e d u c e 3 ( T   * g _ i d a t a ,   T   * g _ o d a t a ,   u n s i g n e d   i n t   n ) 
++ 
++ { 
++ 
++         / /   H a n d l e   t o   t h r e a d   b l o c k   g r o u p 
++ 
++         c g : : t h r e a d _ b l o c k   c t a       =   c g : : t h i s _ t h r e a d _ b l o c k ( ) ; 
++ 
++         T                               * s d a t a   =   S h a r e d M e m o r y < T > ( ) ; 
++ 
++ 
++ 
++         / /   p e r f o r m   f i r s t   l e v e l   o f   r e d u c t i o n , 
++ 
++         / /   r e a d i n g   f r o m   g l o b a l   m e m o r y ,   w r i t i n g   t o   s h a r e d   m e m o r y 
++ 
++         u n s i g n e d   i n t   t i d   =   t h r e a d I d x . x ; 
++ 
++         u n s i g n e d   i n t   i       =   b l o c k I d x . x   *   ( b l o c k D i m . x   *   2 )   +   t h r e a d I d x . x ; 
++ 
++ 
++ 
++         T   m y S u m   =   ( i   <   n )   ?   g _ i d a t a [ i ]   :   0 ; 
++ 
++ 
++ 
++         i f   ( i   +   b l o c k D i m . x   <   n ) 
++ 
++                 m y S u m   + =   g _ i d a t a [ i   +   b l o c k D i m . x ] ; 
++ 
++ 
++ 
++         s d a t a [ t i d ]   =   m y S u m ; 
++ 
++         c g : : s y n c ( c t a ) ; 
++ 
++ 
++ 
++         / /   d o   r e d u c t i o n   i n   s h a r e d   m e m 
++ 
++         f o r   ( u n s i g n e d   i n t   s   =   b l o c k D i m . x   /   2 ;   s   >   0 ;   s   > > =   1 )   { 
++ 
++                 i f   ( t i d   <   s )   { 
++ 
++                         s d a t a [ t i d ]   =   m y S u m   =   m y S u m   +   s d a t a [ t i d   +   s ] ; 
++ 
++                 } 
++ 
++ 
++ 
++                 c g : : s y n c ( c t a ) ; 
++ 
++         } 
++ 
++ 
++ 
++         / /   w r i t e   r e s u l t   f o r   t h i s   b l o c k   t o   g l o b a l   m e m 
++ 
++         i f   ( t i d   = =   0 ) 
++ 
++                 g _ o d a t a [ b l o c k I d x . x ]   =   m y S u m ; 
++ 
++ } 
++ 
++ 
++ 
++ / * 
++ 
++         T h i s   v e r s i o n   u s e s   t h e   w a r p   s h u f f l e   o p e r a t i o n   i f   a v a i l a b l e   t o   r e d u c e 
++ 
++         w a r p   s y n c h r o n i z a t i o n .   W h e n   s h u f f l e   i s   n o t   a v a i l a b l e   t h e   f i n a l   w a r p ' s 
++ 
++         w o r t h   o f   w o r k   i s   u n r o l l e d   t o   r e d u c e   l o o p i n g   o v e r h e a d . 
++ 
++ 
++ 
++         S e e 
++ 
++       h t t p : / / d e v b l o g s . n v i d i a . c o m / p a r a l l e l f o r a l l / f a s t e r - p a r a l l e l - r e d u c t i o n s - k e p l e r / 
++ 
++         f o r   a d d i t i o n a l   i n f o r m a t i o n   a b o u t   u s i n g   s h u f f l e   t o   p e r f o r m   a   r e d u c t i o n 
++ 
++         w i t h i n   a   w a r p . 
++ 
++ 
++ 
++         N o t e ,   t h i s   k e r n e l   n e e d s   a   m i n i m u m   o f   6 4 * s i z e o f ( T )   b y t e s   o f   s h a r e d   m e m o r y . 
++ 
++         I n   o t h e r   w o r d s   i f   b l o c k S i z e   < =   3 2 ,   a l l o c a t e   6 4 * s i z e o f ( T )   b y t e s . 
++ 
++         I f   b l o c k S i z e   >   3 2 ,   a l l o c a t e   b l o c k S i z e * s i z e o f ( T )   b y t e s . 
++ 
++ * / 
++ 
++ t e m p l a t e   < c l a s s   T ,   u n s i g n e d   i n t   b l o c k S i z e >   _ _ g l o b a l _ _   v o i d   r e d u c e 4 ( T   * g _ i d a t a ,   T   * g _ o d a t a ,   u n s i g n e d   i n t   n ) 
++ 
++ { 
++ 
++         / /   H a n d l e   t o   t h r e a d   b l o c k   g r o u p 
++ 
++         c g : : t h r e a d _ b l o c k   c t a       =   c g : : t h i s _ t h r e a d _ b l o c k ( ) ; 
++ 
++         T                               * s d a t a   =   S h a r e d M e m o r y < T > ( ) ; 
++ 
++ 
++ 
++         / /   p e r f o r m   f i r s t   l e v e l   o f   r e d u c t i o n , 
++ 
++         / /   r e a d i n g   f r o m   g l o b a l   m e m o r y ,   w r i t i n g   t o   s h a r e d   m e m o r y 
++ 
++         u n s i g n e d   i n t   t i d   =   t h r e a d I d x . x ; 
++ 
++         u n s i g n e d   i n t   i       =   b l o c k I d x . x   *   ( b l o c k D i m . x   *   2 )   +   t h r e a d I d x . x ; 
++ 
++ 
++ 
++         T   m y S u m   =   ( i   <   n )   ?   g _ i d a t a [ i ]   :   0 ; 
++ 
++ 
++ 
++         i f   ( i   +   b l o c k S i z e   <   n ) 
++ 
++                 m y S u m   + =   g _ i d a t a [ i   +   b l o c k S i z e ] ; 
++ 
++ 
++ 
++         s d a t a [ t i d ]   =   m y S u m ; 
++ 
++         c g : : s y n c ( c t a ) ; 
++ 
++ 
++ 
++         / /   d o   r e d u c t i o n   i n   s h a r e d   m e m 
++ 
++         f o r   ( u n s i g n e d   i n t   s   =   b l o c k D i m . x   /   2 ;   s   >   3 2 ;   s   > > =   1 )   { 
++ 
++                 i f   ( t i d   <   s )   { 
++ 
++                         s d a t a [ t i d ]   =   m y S u m   =   m y S u m   +   s d a t a [ t i d   +   s ] ; 
++ 
++                 } 
++ 
++ 
++ 
++                 c g : : s y n c ( c t a ) ; 
++ 
++         } 
++ 
++ 
++ 
++         c g : : t h r e a d _ b l o c k _ t i l e < 3 2 >   t i l e 3 2   =   c g : : t i l e d _ p a r t i t i o n < 3 2 > ( c t a ) ; 
++ 
++ 
++ 
++         i f   ( c t a . t h r e a d _ r a n k ( )   <   3 2 )   { 
++ 
++                 / /   F e t c h   f i n a l   i n t e r m e d i a t e   s u m   f r o m   2 n d   w a r p 
++ 
++                 i f   ( b l o c k S i z e   > =   6 4 ) 
++ 
++                         m y S u m   + =   s d a t a [ t i d   +   3 2 ] ; 
++ 
++                 / /   R e d u c e   f i n a l   w a r p   u s i n g   s h u f f l e 
++ 
++                 f o r   ( i n t   o f f s e t   =   t i l e 3 2 . s i z e ( )   /   2 ;   o f f s e t   >   0 ;   o f f s e t   / =   2 )   { 
++ 
++                         m y S u m   + =   t i l e 3 2 . s h f l _ d o w n ( m y S u m ,   o f f s e t ) ; 
++ 
++                 } 
++ 
++         } 
++ 
++ 
++ 
++         / /   w r i t e   r e s u l t   f o r   t h i s   b l o c k   t o   g l o b a l   m e m 
++ 
++         i f   ( c t a . t h r e a d _ r a n k ( )   = =   0 ) 
++ 
++                 g _ o d a t a [ b l o c k I d x . x ]   =   m y S u m ; 
++ 
++ } 
++ 
++ 
++ 
++ / * 
++ 
++         T h i s   v e r s i o n   i s   c o m p l e t e l y   u n r o l l e d ,   u n l e s s   w a r p   s h u f f l e   i s   a v a i l a b l e ,   t h e n 
++ 
++         s h u f f l e   i s   u s e d   w i t h i n   a   l o o p .     I t   u s e s   a   t e m p l a t e   p a r a m e t e r   t o   a c h i e v e 
++ 
++         o p t i m a l   c o d e   f o r   a n y   ( p o w e r   o f   2 )   n u m b e r   o f   t h r e a d s .     T h i s   r e q u i r e s   a   s w i t c h 
++ 
++         s t a t e m e n t   i n   t h e   h o s t   c o d e   t o   h a n d l e   a l l   t h e   d i f f e r e n t   t h r e a d   b l o c k   s i z e s   a t 
++ 
++         c o m p i l e   t i m e .   W h e n   s h u f f l e   i s   a v a i l a b l e ,   i t   i s   u s e d   t o   r e d u c e   w a r p 
++ 
++       s y n c h r o n i z a t i o n . 
++ 
++ 
++ 
++         N o t e ,   t h i s   k e r n e l   n e e d s   a   m i n i m u m   o f   6 4 * s i z e o f ( T )   b y t e s   o f   s h a r e d   m e m o r y . 
++ 
++         I n   o t h e r   w o r d s   i f   b l o c k S i z e   < =   3 2 ,   a l l o c a t e   6 4 * s i z e o f ( T )   b y t e s . 
++ 
++         I f   b l o c k S i z e   >   3 2 ,   a l l o c a t e   b l o c k S i z e * s i z e o f ( T )   b y t e s . 
++ 
++ * / 
++ 
++ t e m p l a t e   < c l a s s   T ,   u n s i g n e d   i n t   b l o c k S i z e >   _ _ g l o b a l _ _   v o i d   r e d u c e 5 ( T   * g _ i d a t a ,   T   * g _ o d a t a ,   u n s i g n e d   i n t   n ) 
++ 
++ { 
++ 
++         / /   H a n d l e   t o   t h r e a d   b l o c k   g r o u p 
++ 
++         c g : : t h r e a d _ b l o c k   c t a       =   c g : : t h i s _ t h r e a d _ b l o c k ( ) ; 
++ 
++         T                               * s d a t a   =   S h a r e d M e m o r y < T > ( ) ; 
++ 
++ 
++ 
++         / /   p e r f o r m   f i r s t   l e v e l   o f   r e d u c t i o n , 
++ 
++         / /   r e a d i n g   f r o m   g l o b a l   m e m o r y ,   w r i t i n g   t o   s h a r e d   m e m o r y 
++ 
++         u n s i g n e d   i n t   t i d   =   t h r e a d I d x . x ; 
++ 
++         u n s i g n e d   i n t   i       =   b l o c k I d x . x   *   ( b l o c k S i z e   *   2 )   +   t h r e a d I d x . x ; 
++ 
++ 
++ 
++         T   m y S u m   =   ( i   <   n )   ?   g _ i d a t a [ i ]   :   0 ; 
++ 
++ 
++ 
++         i f   ( i   +   b l o c k S i z e   <   n ) 
++ 
++                 m y S u m   + =   g _ i d a t a [ i   +   b l o c k S i z e ] ; 
++ 
++ 
++ 
++         s d a t a [ t i d ]   =   m y S u m ; 
++ 
++         c g : : s y n c ( c t a ) ; 
++ 
++ 
++ 
++         / /   d o   r e d u c t i o n   i n   s h a r e d   m e m 
++ 
++         i f   ( ( b l o c k S i z e   > =   5 1 2 )   & &   ( t i d   <   2 5 6 ) )   { 
++ 
++                 s d a t a [ t i d ]   =   m y S u m   =   m y S u m   +   s d a t a [ t i d   +   2 5 6 ] ; 
++ 
++         } 
++ 
++ 
++ 
++         c g : : s y n c ( c t a ) ; 
++ 
++ 
++ 
++         i f   ( ( b l o c k S i z e   > =   2 5 6 )   & &   ( t i d   <   1 2 8 ) )   { 
++ 
++                 s d a t a [ t i d ]   =   m y S u m   =   m y S u m   +   s d a t a [ t i d   +   1 2 8 ] ; 
++ 
++         } 
++ 
++ 
++ 
++         c g : : s y n c ( c t a ) ; 
++ 
++ 
++ 
++         i f   ( ( b l o c k S i z e   > =   1 2 8 )   & &   ( t i d   <   6 4 ) )   { 
++ 
++                 s d a t a [ t i d ]   =   m y S u m   =   m y S u m   +   s d a t a [ t i d   +   6 4 ] ; 
++ 
++         } 
++ 
++ 
++ 
++         c g : : s y n c ( c t a ) ; 
++ 
++ 
++ 
++         c g : : t h r e a d _ b l o c k _ t i l e < 3 2 >   t i l e 3 2   =   c g : : t i l e d _ p a r t i t i o n < 3 2 > ( c t a ) ; 
++ 
++ 
++ 
++         i f   ( c t a . t h r e a d _ r a n k ( )   <   3 2 )   { 
++ 
++                 / /   F e t c h   f i n a l   i n t e r m e d i a t e   s u m   f r o m   2 n d   w a r p 
++ 
++                 i f   ( b l o c k S i z e   > =   6 4 ) 
++ 
++                         m y S u m   + =   s d a t a [ t i d   +   3 2 ] ; 
++ 
++                 / /   R e d u c e   f i n a l   w a r p   u s i n g   s h u f f l e 
++ 
++                 f o r   ( i n t   o f f s e t   =   t i l e 3 2 . s i z e ( )   /   2 ;   o f f s e t   >   0 ;   o f f s e t   / =   2 )   { 
++ 
++                         m y S u m   + =   t i l e 3 2 . s h f l _ d o w n ( m y S u m ,   o f f s e t ) ; 
++ 
++                 } 
++ 
++         } 
++ 
++ 
++ 
++         / /   w r i t e   r e s u l t   f o r   t h i s   b l o c k   t o   g l o b a l   m e m 
++ 
++         i f   ( c t a . t h r e a d _ r a n k ( )   = =   0 ) 
++ 
++                 g _ o d a t a [ b l o c k I d x . x ]   =   m y S u m ; 
++ 
++ } 
++ 
++ 
++ 
++ / * 
++ 
++         T h i s   v e r s i o n   a d d s   m u l t i p l e   e l e m e n t s   p e r   t h r e a d   s e q u e n t i a l l y .     T h i s   r e d u c e s 
++ 
++       t h e   o v e r a l l   c o s t   o f   t h e   a l g o r i t h m   w h i l e   k e e p i n g   t h e   w o r k   c o m p l e x i t y   O ( n )   a n d 
++ 
++       t h e   s t e p   c o m p l e x i t y   O ( l o g   n ) .   ( B r e n t ' s   T h e o r e m   o p t i m i z a t i o n ) 
++ 
++ 
++ 
++         N o t e ,   t h i s   k e r n e l   n e e d s   a   m i n i m u m   o f   6 4 * s i z e o f ( T )   b y t e s   o f   s h a r e d   m e m o r y . 
++ 
++         I n   o t h e r   w o r d s   i f   b l o c k S i z e   < =   3 2 ,   a l l o c a t e   6 4 * s i z e o f ( T )   b y t e s . 
++ 
++         I f   b l o c k S i z e   >   3 2 ,   a l l o c a t e   b l o c k S i z e * s i z e o f ( T )   b y t e s . 
++ 
++ * / 
++ 
++ t e m p l a t e   < c l a s s   T ,   u n s i g n e d   i n t   b l o c k S i z e ,   b o o l   n I s P o w 2 >   _ _ g l o b a l _ _   v o i d   r e d u c e 6 ( T   * g _ i d a t a ,   T   * g _ o d a t a ,   u n s i g n e d   i n t   n ) 
++ 
++ { 
++ 
++         / /   H a n d l e   t o   t h r e a d   b l o c k   g r o u p 
++ 
++         c g : : t h r e a d _ b l o c k   c t a       =   c g : : t h i s _ t h r e a d _ b l o c k ( ) ; 
++ 
++         T                               * s d a t a   =   S h a r e d M e m o r y < T > ( ) ; 
++ 
++ 
++ 
++         / /   p e r f o r m   f i r s t   l e v e l   o f   r e d u c t i o n , 
++ 
++         / /   r e a d i n g   f r o m   g l o b a l   m e m o r y ,   w r i t i n g   t o   s h a r e d   m e m o r y 
++ 
++         u n s i g n e d   i n t   t i d             =   t h r e a d I d x . x ; 
++ 
++         u n s i g n e d   i n t   g r i d S i z e   =   b l o c k S i z e   *   g r i d D i m . x ; 
++ 
++ 
++ 
++         T   m y S u m   =   0 ; 
++ 
++ 
++ 
++         / /   w e   r e d u c e   m u l t i p l e   e l e m e n t s   p e r   t h r e a d .     T h e   n u m b e r   i s   d e t e r m i n e d   b y   t h e 
++ 
++         / /   n u m b e r   o f   a c t i v e   t h r e a d   b l o c k s   ( v i a   g r i d D i m ) .     M o r e   b l o c k s   w i l l   r e s u l t 
++ 
++         / /   i n   a   l a r g e r   g r i d S i z e   a n d   t h e r e f o r e   f e w e r   e l e m e n t s   p e r   t h r e a d 
++ 
++         i f   ( n I s P o w 2 )   { 
++ 
++                 u n s i g n e d   i n t   i   =   b l o c k I d x . x   *   b l o c k S i z e   *   2   +   t h r e a d I d x . x ; 
++ 
++                 g r i d S i z e               =   g r i d S i z e   < <   1 ; 
++ 
++ 
++ 
++                 w h i l e   ( i   <   n )   { 
++ 
++                         m y S u m   + =   g _ i d a t a [ i ] ; 
++ 
++                         / /   e n s u r e   w e   d o n ' t   r e a d   o u t   o f   b o u n d s   - -   t h i s   i s   o p t i m i z e d   a w a y   f o r 
++ 
++                         / /   p o w e r O f 2   s i z e d   a r r a y s 
++ 
++                         i f   ( ( i   +   b l o c k S i z e )   <   n )   { 
++ 
++                                 m y S u m   + =   g _ i d a t a [ i   +   b l o c k S i z e ] ; 
++ 
++                         } 
++ 
++                         i   + =   g r i d S i z e ; 
++ 
++                 } 
++ 
++         } 
++ 
++         e l s e   { 
++ 
++                 u n s i g n e d   i n t   i   =   b l o c k I d x . x   *   b l o c k S i z e   +   t h r e a d I d x . x ; 
++ 
++                 w h i l e   ( i   <   n )   { 
++ 
++                         m y S u m   + =   g _ i d a t a [ i ] ; 
++ 
++                         i   + =   g r i d S i z e ; 
++ 
++                 } 
++ 
++         } 
++ 
++ 
++ 
++         / /   e a c h   t h r e a d   p u t s   i t s   l o c a l   s u m   i n t o   s h a r e d   m e m o r y 
++ 
++         s d a t a [ t i d ]   =   m y S u m ; 
++ 
++         c g : : s y n c ( c t a ) ; 
++ 
++ 
++ 
++         / /   d o   r e d u c t i o n   i n   s h a r e d   m e m 
++ 
++         i f   ( ( b l o c k S i z e   > =   5 1 2 )   & &   ( t i d   <   2 5 6 ) )   { 
++ 
++                 s d a t a [ t i d ]   =   m y S u m   =   m y S u m   +   s d a t a [ t i d   +   2 5 6 ] ; 
++ 
++         } 
++ 
++ 
++ 
++         c g : : s y n c ( c t a ) ; 
++ 
++ 
++ 
++         i f   ( ( b l o c k S i z e   > =   2 5 6 )   & &   ( t i d   <   1 2 8 ) )   { 
++ 
++                 s d a t a [ t i d ]   =   m y S u m   =   m y S u m   +   s d a t a [ t i d   +   1 2 8 ] ; 
++ 
++         } 
++ 
++ 
++ 
++         c g : : s y n c ( c t a ) ; 
++ 
++ 
++ 
++         i f   ( ( b l o c k S i z e   > =   1 2 8 )   & &   ( t i d   <   6 4 ) )   { 
++ 
++                 s d a t a [ t i d ]   =   m y S u m   =   m y S u m   +   s d a t a [ t i d   +   6 4 ] ; 
++ 
++         } 
++ 
++ 
++ 
++         c g : : s y n c ( c t a ) ; 
++ 
++ 
++ 
++         c g : : t h r e a d _ b l o c k _ t i l e < 3 2 >   t i l e 3 2   =   c g : : t i l e d _ p a r t i t i o n < 3 2 > ( c t a ) ; 
++ 
++ 
++ 
++         i f   ( c t a . t h r e a d _ r a n k ( )   <   3 2 )   { 
++ 
++                 / /   F e t c h   f i n a l   i n t e r m e d i a t e   s u m   f r o m   2 n d   w a r p 
++ 
++                 i f   ( b l o c k S i z e   > =   6 4 ) 
++ 
++                         m y S u m   + =   s d a t a [ t i d   +   3 2 ] ; 
++ 
++                 / /   R e d u c e   f i n a l   w a r p   u s i n g   s h u f f l e 
++ 
++                 f o r   ( i n t   o f f s e t   =   t i l e 3 2 . s i z e ( )   /   2 ;   o f f s e t   >   0 ;   o f f s e t   / =   2 )   { 
++ 
++                         m y S u m   + =   t i l e 3 2 . s h f l _ d o w n ( m y S u m ,   o f f s e t ) ; 
++ 
++                 } 
++ 
++         } 
++ 
++ 
++ 
++         / /   w r i t e   r e s u l t   f o r   t h i s   b l o c k   t o   g l o b a l   m e m 
++ 
++         i f   ( c t a . t h r e a d _ r a n k ( )   = =   0 ) 
++ 
++                 g _ o d a t a [ b l o c k I d x . x ]   =   m y S u m ; 
++ 
++ } 
++ 
++ 
++ 
++ t e m p l a t e   < t y p e n a m e   T ,   u n s i g n e d   i n t   b l o c k S i z e ,   b o o l   n I s P o w 2 > 
++ 
++ _ _ g l o b a l _ _   v o i d   r e d u c e 7 ( c o n s t   T   * _ _ r e s t r i c t _ _   g _ i d a t a ,   T   * _ _ r e s t r i c t _ _   g _ o d a t a ,   u n s i g n e d   i n t   n ) 
++ 
++ { 
++ 
++         T   * s d a t a   =   S h a r e d M e m o r y < T > ( ) ; 
++ 
++ 
++ 
++         / /   p e r f o r m   f i r s t   l e v e l   o f   r e d u c t i o n , 
++ 
++         / /   r e a d i n g   f r o m   g l o b a l   m e m o r y ,   w r i t i n g   t o   s h a r e d   m e m o r y 
++ 
++         u n s i g n e d   i n t   t i d                 =   t h r e a d I d x . x ; 
++ 
++         u n s i g n e d   i n t   g r i d S i z e       =   b l o c k S i z e   *   g r i d D i m . x ; 
++ 
++         u n s i g n e d   i n t   m a s k L e n g t h   =   ( b l o c k S i z e   &   3 1 ) ;   / /   3 1   =   w a r p S i z e - 1 
++ 
++         m a s k L e n g t h                             =   ( m a s k L e n g t h   >   0 )   ?   ( 3 2   -   m a s k L e n g t h )   :   m a s k L e n g t h ; 
++ 
++         c o n s t   u n s i g n e d   i n t   m a s k   =   ( 0 x f f f f f f f f )   > >   m a s k L e n g t h ; 
++ 
++ 
++ 
++         T   m y S u m   =   0 ; 
++ 
++ 
++ 
++         / /   w e   r e d u c e   m u l t i p l e   e l e m e n t s   p e r   t h r e a d .     T h e   n u m b e r   i s   d e t e r m i n e d   b y   t h e 
++ 
++         / /   n u m b e r   o f   a c t i v e   t h r e a d   b l o c k s   ( v i a   g r i d D i m ) .     M o r e   b l o c k s   w i l l   r e s u l t 
++ 
++         / /   i n   a   l a r g e r   g r i d S i z e   a n d   t h e r e f o r e   f e w e r   e l e m e n t s   p e r   t h r e a d 
++ 
++         i f   ( n I s P o w 2 )   { 
++ 
++                 u n s i g n e d   i n t   i   =   b l o c k I d x . x   *   b l o c k S i z e   *   2   +   t h r e a d I d x . x ; 
++ 
++                 g r i d S i z e               =   g r i d S i z e   < <   1 ; 
++ 
++ 
++ 
++                 w h i l e   ( i   <   n )   { 
++ 
++                         m y S u m   + =   g _ i d a t a [ i ] ; 
++ 
++                         / /   e n s u r e   w e   d o n ' t   r e a d   o u t   o f   b o u n d s   - -   t h i s   i s   o p t i m i z e d   a w a y   f o r 
++ 
++                         / /   p o w e r O f 2   s i z e d   a r r a y s 
++ 
++                         i f   ( ( i   +   b l o c k S i z e )   <   n )   { 
++ 
++                                 m y S u m   + =   g _ i d a t a [ i   +   b l o c k S i z e ] ; 
++ 
++                         } 
++ 
++                         i   + =   g r i d S i z e ; 
++ 
++                 } 
++ 
++         } 
++ 
++         e l s e   { 
++ 
++                 u n s i g n e d   i n t   i   =   b l o c k I d x . x   *   b l o c k S i z e   +   t h r e a d I d x . x ; 
++ 
++                 w h i l e   ( i   <   n )   { 
++ 
++                         m y S u m   + =   g _ i d a t a [ i ] ; 
++ 
++                         i   + =   g r i d S i z e ; 
++ 
++                 } 
++ 
++         } 
++ 
++ 
++ 
++         / /   R e d u c e   w i t h i n   w a r p   u s i n g   s h u f f l e   o r   r e d u c e _ a d d   i f   T = = i n t   &   C U D A _ A R C H   = = 
++ 
++         / /   S M   8 . 0 
++ 
++         m y S u m   =   w a r p R e d u c e S u m < T > ( m a s k ,   m y S u m ) ; 
++ 
++ 
++ 
++         / /   e a c h   t h r e a d   p u t s   i t s   l o c a l   s u m   i n t o   s h a r e d   m e m o r y 
++ 
++         i f   ( ( t i d   %   w a r p S i z e )   = =   0 )   { 
++ 
++                 s d a t a [ t i d   /   w a r p S i z e ]   =   m y S u m ; 
++ 
++         } 
++ 
++ 
++ 
++         _ _ s y n c t h r e a d s ( ) ; 
++ 
++ 
++ 
++         c o n s t   u n s i g n e d   i n t   s h m e m _ e x t e n t     =   ( b l o c k S i z e   /   w a r p S i z e )   >   0   ?   ( b l o c k S i z e   /   w a r p S i z e )   :   1 ; 
++ 
++         c o n s t   u n s i g n e d   i n t   b a l l o t _ r e s u l t   =   _ _ b a l l o t _ s y n c ( m a s k ,   t i d   <   s h m e m _ e x t e n t ) ; 
++ 
++         i f   ( t i d   <   s h m e m _ e x t e n t )   { 
++ 
++                 m y S u m   =   s d a t a [ t i d ] ; 
++ 
++                 / /   R e d u c e   f i n a l   w a r p   u s i n g   s h u f f l e   o r   r e d u c e _ a d d   i f   T = = i n t   &   C U D A _ A R C H   = = 
++ 
++                 / /   S M   8 . 0 
++ 
++                 m y S u m   =   w a r p R e d u c e S u m < T > ( b a l l o t _ r e s u l t ,   m y S u m ) ; 
++ 
++         } 
++ 
++ 
++ 
++         / /   w r i t e   r e s u l t   f o r   t h i s   b l o c k   t o   g l o b a l   m e m 
++ 
++         i f   ( t i d   = =   0 )   { 
++ 
++                 g _ o d a t a [ b l o c k I d x . x ]   =   m y S u m ; 
++ 
++         } 
++ 
++ } 
++ 
++ 
++ 
++ / /   P e r f o r m s   a   r e d u c t i o n   s t e p   a n d   u p d a t e s   n u m T o t a l   w i t h   h o w   m a n y   a r e   r e m a i n i n g 
++ 
++ t e m p l a t e   < t y p e n a m e   T ,   t y p e n a m e   G r o u p >   _ _ d e v i c e _ _   T   c g _ r e d u c e _ n ( T   i n ,   G r o u p   & t h r e a d s ) 
++ 
++ { 
++ 
++         r e t u r n   c g : : r e d u c e ( t h r e a d s ,   i n ,   c g : : p l u s < T > ( ) ) ; 
++ 
++ } 
++ 
++ 
++ 
++ t e m p l a t e   < c l a s s   T >   _ _ g l o b a l _ _   v o i d   c g _ r e d u c e ( T   * g _ i d a t a ,   T   * g _ o d a t a ,   u n s i g n e d   i n t   n ) 
++ 
++ { 
++ 
++         / /   S h a r e d   m e m o r y   f o r   i n t e r m e d i a t e   s t e p s 
++ 
++         T   * s d a t a   =   S h a r e d M e m o r y < T > ( ) ; 
++ 
++         / /   H a n d l e   t o   t h r e a d   b l o c k   g r o u p 
++ 
++         c g : : t h r e a d _ b l o c k   c t a   =   c g : : t h i s _ t h r e a d _ b l o c k ( ) ; 
++ 
++         / /   H a n d l e   t o   t i l e   i n   t h r e a d   b l o c k 
++ 
++         c g : : t h r e a d _ b l o c k _ t i l e < 3 2 >   t i l e   =   c g : : t i l e d _ p a r t i t i o n < 3 2 > ( c t a ) ; 
++ 
++ 
++ 
++         u n s i g n e d   i n t   c t a S i z e           =   c t a . s i z e ( ) ; 
++ 
++         u n s i g n e d   i n t   n u m C t a s           =   g r i d D i m . x ; 
++ 
++         u n s i g n e d   i n t   t h r e a d R a n k     =   c t a . t h r e a d _ r a n k ( ) ; 
++ 
++         u n s i g n e d   i n t   t h r e a d I n d e x   =   ( b l o c k I d x . x   *   c t a S i z e )   +   t h r e a d R a n k ; 
++ 
++ 
++ 
++         T   t h r e a d V a l   =   0 ; 
++ 
++         { 
++ 
++                 u n s i g n e d   i n t   i                       =   t h r e a d I n d e x ; 
++ 
++                 u n s i g n e d   i n t   i n d e x S t r i d e   =   ( n u m C t a s   *   c t a S i z e ) ; 
++ 
++                 w h i l e   ( i   <   n )   { 
++ 
++                         t h r e a d V a l   + =   g _ i d a t a [ i ] ; 
++ 
++                         i   + =   i n d e x S t r i d e ; 
++ 
++                 } 
++ 
++                 s d a t a [ t h r e a d R a n k ]   =   t h r e a d V a l ; 
++ 
++         } 
++ 
++ 
++ 
++         / /   W a i t   f o r   a l l   t i l e s   t o   f i n i s h   a n d   r e d u c e   w i t h i n   C T A 
++ 
++         { 
++ 
++                 u n s i g n e d   i n t   c t a S t e p s   =   t i l e . m e t a _ g r o u p _ s i z e ( ) ; 
++ 
++                 u n s i g n e d   i n t   c t a I n d e x   =   c t a S i z e   > >   1 ; 
++ 
++                 w h i l e   ( c t a I n d e x   > =   3 2 )   { 
++ 
++                         c t a . s y n c ( ) ; 
++ 
++                         i f   ( t h r e a d R a n k   <   c t a I n d e x )   { 
++ 
++                                 t h r e a d V a l   + =   s d a t a [ t h r e a d R a n k   +   c t a I n d e x ] ; 
++ 
++                                 s d a t a [ t h r e a d R a n k ]   =   t h r e a d V a l ; 
++ 
++                         } 
++ 
++                         c t a S t e p s   > > =   1 ; 
++ 
++                         c t a I n d e x   > > =   1 ; 
++ 
++                 } 
++ 
++         } 
++ 
++ 
++ 
++         / /   S h u f f l e   r e d u x   i n s t e a d   o f   s m e m   r e d u x 
++ 
++         { 
++ 
++                 c t a . s y n c ( ) ; 
++ 
++                 i f   ( t i l e . m e t a _ g r o u p _ r a n k ( )   = =   0 )   { 
++ 
++                         t h r e a d V a l   =   c g _ r e d u c e _ n ( t h r e a d V a l ,   t i l e ) ; 
++ 
++                 } 
++ 
++         } 
++ 
++ 
++ 
++         i f   ( t h r e a d R a n k   = =   0 ) 
++ 
++                 g _ o d a t a [ b l o c k I d x . x ]   =   t h r e a d V a l ; 
++ 
++ } 
++ 
++ 
++ 
++ t e m p l a t e   < c l a s s   T ,   s i z e _ t   B l o c k S i z e ,   s i z e _ t   M u l t i W a r p G r o u p S i z e > 
++ 
++ _ _ g l o b a l _ _   v o i d   m u l t i _ w a r p _ c g _ r e d u c e ( T   * g _ i d a t a ,   T   * g _ o d a t a ,   u n s i g n e d   i n t   n ) 
++ 
++ { 
++ 
++         / /   S h a r e d   m e m o r y   f o r   i n t e r m e d i a t e   s t e p s 
++ 
++         T                   * s d a t a   =   S h a r e d M e m o r y < T > ( ) ; 
++ 
++         _ _ s h a r e d _ _   c g : : b l o c k _ t i l e _ m e m o r y < B l o c k S i z e >   s c r a t c h ; 
++ 
++ 
++ 
++         / /   H a n d l e   t o   t h r e a d   b l o c k   g r o u p 
++ 
++         a u t o   c t a   =   c g : : t h i s _ t h r e a d _ b l o c k ( s c r a t c h ) ; 
++ 
++         / /   H a n d l e   t o   m u l t i W a r p T i l e   i n   t h r e a d   b l o c k 
++ 
++         a u t o   m u l t i W a r p T i l e   =   c g : : t i l e d _ p a r t i t i o n < M u l t i W a r p G r o u p S i z e > ( c t a ) ; 
++ 
++ 
++ 
++         u n s i g n e d   i n t   g r i d S i z e     =   B l o c k S i z e   *   g r i d D i m . x ; 
++ 
++         T                         t h r e a d V a l   =   0 ; 
++ 
++ 
++ 
++         / /   w e   r e d u c e   m u l t i p l e   e l e m e n t s   p e r   t h r e a d .     T h e   n u m b e r   i s   d e t e r m i n e d   b y   t h e 
++ 
++         / /   n u m b e r   o f   a c t i v e   t h r e a d   b l o c k s   ( v i a   g r i d D i m ) .     M o r e   b l o c k s   w i l l   r e s u l t 
++ 
++         / /   i n   a   l a r g e r   g r i d S i z e   a n d   t h e r e f o r e   f e w e r   e l e m e n t s   p e r   t h r e a d 
++ 
++         i n t   n I s P o w 2   =   ! ( n   &   n   -   1 ) ; 
++ 
++         i f   ( n I s P o w 2 )   { 
++ 
++                 u n s i g n e d   i n t   i   =   b l o c k I d x . x   *   B l o c k S i z e   *   2   +   t h r e a d I d x . x ; 
++ 
++                 g r i d S i z e               =   g r i d S i z e   < <   1 ; 
++ 
++ 
++ 
++                 w h i l e   ( i   <   n )   { 
++ 
++                         t h r e a d V a l   + =   g _ i d a t a [ i ] ; 
++ 
++                         / /   e n s u r e   w e   d o n ' t   r e a d   o u t   o f   b o u n d s   - -   t h i s   i s   o p t i m i z e d   a w a y   f o r 
++ 
++                         / /   p o w e r O f 2   s i z e d   a r r a y s 
++ 
++                         i f   ( ( i   +   B l o c k S i z e )   <   n )   { 
++ 
++                                 t h r e a d V a l   + =   g _ i d a t a [ i   +   b l o c k D i m . x ] ; 
++ 
++                         } 
++ 
++                         i   + =   g r i d S i z e ; 
++ 
++                 } 
++ 
++         } 
++ 
++         e l s e   { 
++ 
++                 u n s i g n e d   i n t   i   =   b l o c k I d x . x   *   B l o c k S i z e   +   t h r e a d I d x . x ; 
++ 
++                 w h i l e   ( i   <   n )   { 
++ 
++                         t h r e a d V a l   + =   g _ i d a t a [ i ] ; 
++ 
++                         i   + =   g r i d S i z e ; 
++ 
++                 } 
++ 
++         } 
++ 
++ 
++ 
++         t h r e a d V a l   =   c g _ r e d u c e _ n ( t h r e a d V a l ,   m u l t i W a r p T i l e ) ; 
++ 
++ 
++ 
++         i f   ( m u l t i W a r p T i l e . t h r e a d _ r a n k ( )   = =   0 )   { 
++ 
++                 s d a t a [ m u l t i W a r p T i l e . m e t a _ g r o u p _ r a n k ( ) ]   =   t h r e a d V a l ; 
++ 
++         } 
++ 
++         c g : : s y n c ( c t a ) ; 
++ 
++ 
++ 
++         i f   ( t h r e a d I d x . x   = =   0 )   { 
++ 
++                 t h r e a d V a l   =   0 ; 
++ 
++                 f o r   ( i n t   i   =   0 ;   i   <   m u l t i W a r p T i l e . m e t a _ g r o u p _ s i z e ( ) ;   i + + )   { 
++ 
++                         t h r e a d V a l   + =   s d a t a [ i ] ; 
++ 
++                 } 
++ 
++                 g _ o d a t a [ b l o c k I d x . x ]   =   t h r e a d V a l ; 
++ 
++         } 
++ 
++ } 
++ 
++ 
++ 
++ e x t e r n   " C "   b o o l   i s P o w 2 ( u n s i g n e d   i n t   x ) ; 
++ 
++ 
++ 
++ / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / 
++ 
++ / /   W r a p p e r   f u n c t i o n   f o r   k e r n e l   l a u n c h 
++ 
++ / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / 
++ 
++ t e m p l a t e   < c l a s s   T >   v o i d   r e d u c e ( i n t   s i z e ,   i n t   t h r e a d s ,   i n t   b l o c k s ,   i n t   w h i c h K e r n e l ,   T   * d _ i d a t a ,   T   * d _ o d a t a ) 
++ 
++ { 
++ 
++         d i m 3   d i m B l o c k ( t h r e a d s ,   1 ,   1 ) ; 
++ 
++         d i m 3   d i m G r i d ( b l o c k s ,   1 ,   1 ) ; 
++ 
++ 
++ 
++         / /   w h e n   t h e r e   i s   o n l y   o n e   w a r p   p e r   b l o c k ,   w e   n e e d   t o   a l l o c a t e   t w o   w a r p s 
++ 
++         / /   w o r t h   o f   s h a r e d   m e m o r y   s o   t h a t   w e   d o n ' t   i n d e x   s h a r e d   m e m o r y   o u t   o f   b o u n d s 
++ 
++         i n t   s m e m S i z e   =   ( t h r e a d s   < =   3 2 )   ?   2   *   t h r e a d s   *   s i z e o f ( T )   :   t h r e a d s   *   s i z e o f ( T ) ; 
++ 
++ 
++ 
++         / /   a s   k e r n e l   9   -   m u l t i _ w a r p _ c g _ r e d u c e   c a n n o t   w o r k   f o r   m o r e   t h a n   6 4   t h r e a d s 
++ 
++         / /   w e   c h o o s e   t o   s e t   k e r n e l   7   f o r   t h i s   p u r p o s e . 
++ 
++         i f   ( t h r e a d s   <   6 4   & &   w h i c h K e r n e l   = =   9 )   { 
++ 
++                 w h i c h K e r n e l   =   7 ; 
++ 
++         } 
++ 
++ 
++ 
++         / /   c h o o s e   w h i c h   o f   t h e   o p t i m i z e d   v e r s i o n s   o f   r e d u c t i o n   t o   l a u n c h 
++ 
++         s w i t c h   ( w h i c h K e r n e l )   { 
++ 
++         c a s e   0 : 
++ 
++                 r e d u c e 0 < T > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                 b r e a k ; 
++ 
++ 
++ 
++         c a s e   1 : 
++ 
++                 r e d u c e 1 < T > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                 b r e a k ; 
++ 
++ 
++ 
++         c a s e   2 : 
++ 
++                 r e d u c e 2 < T > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                 b r e a k ; 
++ 
++ 
++ 
++         c a s e   3 : 
++ 
++                 r e d u c e 3 < T > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                 b r e a k ; 
++ 
++ 
++ 
++         c a s e   4 : 
++ 
++                 s w i t c h   ( t h r e a d s )   { 
++ 
++                 c a s e   5 1 2 : 
++ 
++                         r e d u c e 4 < T ,   5 1 2 > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   2 5 6 : 
++ 
++                         r e d u c e 4 < T ,   2 5 6 > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   1 2 8 : 
++ 
++                         r e d u c e 4 < T ,   1 2 8 > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   6 4 : 
++ 
++                         r e d u c e 4 < T ,   6 4 > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   3 2 : 
++ 
++                         r e d u c e 4 < T ,   3 2 > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   1 6 : 
++ 
++                         r e d u c e 4 < T ,   1 6 > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   8 : 
++ 
++                         r e d u c e 4 < T ,   8 > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   4 : 
++ 
++                         r e d u c e 4 < T ,   4 > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   2 : 
++ 
++                         r e d u c e 4 < T ,   2 > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   1 : 
++ 
++                         r e d u c e 4 < T ,   1 > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++                 } 
++ 
++ 
++ 
++                 b r e a k ; 
++ 
++ 
++ 
++         c a s e   5 : 
++ 
++                 s w i t c h   ( t h r e a d s )   { 
++ 
++                 c a s e   5 1 2 : 
++ 
++                         r e d u c e 5 < T ,   5 1 2 > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   2 5 6 : 
++ 
++                         r e d u c e 5 < T ,   2 5 6 > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   1 2 8 : 
++ 
++                         r e d u c e 5 < T ,   1 2 8 > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   6 4 : 
++ 
++                         r e d u c e 5 < T ,   6 4 > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   3 2 : 
++ 
++                         r e d u c e 5 < T ,   3 2 > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   1 6 : 
++ 
++                         r e d u c e 5 < T ,   1 6 > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   8 : 
++ 
++                         r e d u c e 5 < T ,   8 > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   4 : 
++ 
++                         r e d u c e 5 < T ,   4 > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   2 : 
++ 
++                         r e d u c e 5 < T ,   2 > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   1 : 
++ 
++                         r e d u c e 5 < T ,   1 > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++                 } 
++ 
++ 
++ 
++                 b r e a k ; 
++ 
++ 
++ 
++         c a s e   6 : 
++ 
++                 i f   ( i s P o w 2 ( s i z e ) )   { 
++ 
++                         s w i t c h   ( t h r e a d s )   { 
++ 
++                         c a s e   5 1 2 : 
++ 
++                                 r e d u c e 6 < T ,   5 1 2 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   2 5 6 : 
++ 
++                                 r e d u c e 6 < T ,   2 5 6 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   1 2 8 : 
++ 
++                                 r e d u c e 6 < T ,   1 2 8 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   6 4 : 
++ 
++                                 r e d u c e 6 < T ,   6 4 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   3 2 : 
++ 
++                                 r e d u c e 6 < T ,   3 2 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   1 6 : 
++ 
++                                 r e d u c e 6 < T ,   1 6 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   8 : 
++ 
++                                 r e d u c e 6 < T ,   8 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   4 : 
++ 
++                                 r e d u c e 6 < T ,   4 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   2 : 
++ 
++                                 r e d u c e 6 < T ,   2 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   1 : 
++ 
++                                 r e d u c e 6 < T ,   1 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++                         } 
++ 
++                 } 
++ 
++                 e l s e   { 
++ 
++                         s w i t c h   ( t h r e a d s )   { 
++ 
++                         c a s e   5 1 2 : 
++ 
++                                 r e d u c e 6 < T ,   5 1 2 ,   f a l s e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   2 5 6 : 
++ 
++                                 r e d u c e 6 < T ,   2 5 6 ,   f a l s e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   1 2 8 : 
++ 
++                                 r e d u c e 6 < T ,   1 2 8 ,   f a l s e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   6 4 : 
++ 
++                                 r e d u c e 6 < T ,   6 4 ,   f a l s e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   3 2 : 
++ 
++                                 r e d u c e 6 < T ,   3 2 ,   f a l s e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   1 6 : 
++ 
++                                 r e d u c e 6 < T ,   1 6 ,   f a l s e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   8 : 
++ 
++                                 r e d u c e 6 < T ,   8 ,   f a l s e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   4 : 
++ 
++                                 r e d u c e 6 < T ,   4 ,   f a l s e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   2 : 
++ 
++                                 r e d u c e 6 < T ,   2 ,   f a l s e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   1 : 
++ 
++                                 r e d u c e 6 < T ,   1 ,   f a l s e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++                         } 
++ 
++                 } 
++ 
++ 
++ 
++                 b r e a k ; 
++ 
++ 
++ 
++         c a s e   7 : 
++ 
++                 / /   F o r   r e d u c e 7   k e r n e l   w e   r e q u i r e   o n l y   b l o c k S i z e / w a r p S i z e 
++ 
++                 / /   n u m b e r   o f   e l e m e n t s   i n   s h a r e d   m e m o r y 
++ 
++                 s m e m S i z e   =   ( ( t h r e a d s   /   3 2 )   +   1 )   *   s i z e o f ( T ) ; 
++ 
++                 i f   ( i s P o w 2 ( s i z e ) )   { 
++ 
++                         s w i t c h   ( t h r e a d s )   { 
++ 
++                         c a s e   1 0 2 4 : 
++ 
++                                 r e d u c e 7 < T ,   1 0 2 4 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++                         c a s e   5 1 2 : 
++ 
++                                 r e d u c e 7 < T ,   5 1 2 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   2 5 6 : 
++ 
++                                 r e d u c e 7 < T ,   2 5 6 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   1 2 8 : 
++ 
++                                 r e d u c e 7 < T ,   1 2 8 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   6 4 : 
++ 
++                                 r e d u c e 7 < T ,   6 4 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   3 2 : 
++ 
++                                 r e d u c e 7 < T ,   3 2 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   1 6 : 
++ 
++                                 r e d u c e 7 < T ,   1 6 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   8 : 
++ 
++                                 r e d u c e 7 < T ,   8 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   4 : 
++ 
++                                 r e d u c e 7 < T ,   4 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   2 : 
++ 
++                                 r e d u c e 7 < T ,   2 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   1 : 
++ 
++                                 r e d u c e 7 < T ,   1 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++                         } 
++ 
++                 } 
++ 
++                 e l s e   { 
++ 
++                         s w i t c h   ( t h r e a d s )   { 
++ 
++                         c a s e   1 0 2 4 : 
++ 
++                                 r e d u c e 7 < T ,   1 0 2 4 ,   t r u e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++                         c a s e   5 1 2 : 
++ 
++                                 r e d u c e 7 < T ,   5 1 2 ,   f a l s e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   2 5 6 : 
++ 
++                                 r e d u c e 7 < T ,   2 5 6 ,   f a l s e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   1 2 8 : 
++ 
++                                 r e d u c e 7 < T ,   1 2 8 ,   f a l s e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   6 4 : 
++ 
++                                 r e d u c e 7 < T ,   6 4 ,   f a l s e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   3 2 : 
++ 
++                                 r e d u c e 7 < T ,   3 2 ,   f a l s e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   1 6 : 
++ 
++                                 r e d u c e 7 < T ,   1 6 ,   f a l s e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   8 : 
++ 
++                                 r e d u c e 7 < T ,   8 ,   f a l s e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   4 : 
++ 
++                                 r e d u c e 7 < T ,   4 ,   f a l s e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   2 : 
++ 
++                                 r e d u c e 7 < T ,   2 ,   f a l s e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++ 
++ 
++                         c a s e   1 : 
++ 
++                                 r e d u c e 7 < T ,   1 ,   f a l s e > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                                 b r e a k ; 
++ 
++                         } 
++ 
++                 } 
++ 
++ 
++ 
++                 b r e a k ; 
++ 
++         c a s e   8 : 
++ 
++                 c g _ r e d u c e < T > < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                 b r e a k ; 
++ 
++         c a s e   9 : 
++ 
++                 c o n s t e x p r   i n t   n u m O f M u l t i W a r p G r o u p s   =   2 ; 
++ 
++                 s m e m S i z e                                                       =   n u m O f M u l t i W a r p G r o u p s   *   s i z e o f ( T ) ; 
++ 
++                 s w i t c h   ( t h r e a d s )   { 
++ 
++                 c a s e   1 0 2 4 : 
++ 
++                         m u l t i _ w a r p _ c g _ r e d u c e < T ,   1 0 2 4 ,   1 0 2 4   /   n u m O f M u l t i W a r p G r o u p s > 
++ 
++                                 < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   5 1 2 : 
++ 
++                         m u l t i _ w a r p _ c g _ r e d u c e < T ,   5 1 2 ,   5 1 2   /   n u m O f M u l t i W a r p G r o u p s > 
++ 
++                                 < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   2 5 6 : 
++ 
++                         m u l t i _ w a r p _ c g _ r e d u c e < T ,   2 5 6 ,   2 5 6   /   n u m O f M u l t i W a r p G r o u p s > 
++ 
++                                 < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   1 2 8 : 
++ 
++                         m u l t i _ w a r p _ c g _ r e d u c e < T ,   1 2 8 ,   1 2 8   /   n u m O f M u l t i W a r p G r o u p s > 
++ 
++                                 < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 c a s e   6 4 : 
++ 
++                         m u l t i _ w a r p _ c g _ r e d u c e < T ,   6 4 ,   6 4   /   n u m O f M u l t i W a r p G r o u p s > 
++ 
++                                 < < < d i m G r i d ,   d i m B l o c k ,   s m e m S i z e > > > ( d _ i d a t a ,   d _ o d a t a ,   s i z e ) ; 
++ 
++                         b r e a k ; 
++ 
++ 
++ 
++                 d e f a u l t : 
++ 
++                         p r i n t f ( " t h r e a d   b l o c k   s i z e   o f   <   6 4   i s   n o t   s u p p o r t e d   f o r   t h i s   k e r n e l \ n " ) ; 
++ 
++                         b r e a k ; 
++ 
++                 } 
++ 
++                 b r e a k ; 
++ 
++         } 
++ 
++ } 
++ 
++ 
++ 
++ / /   I n s t a n t i a t e   t h e   r e d u c t i o n   f u n c t i o n   f o r   3   t y p e s 
++ 
++ t e m p l a t e   v o i d   r e d u c e < i n t > ( i n t   s i z e ,   i n t   t h r e a d s ,   i n t   b l o c k s ,   i n t   w h i c h K e r n e l ,   i n t   * d _ i d a t a ,   i n t   * d _ o d a t a ) ; 
++ 
++ 
++ 
++ t e m p l a t e   v o i d   r e d u c e < f l o a t > ( i n t   s i z e ,   i n t   t h r e a d s ,   i n t   b l o c k s ,   i n t   w h i c h K e r n e l ,   f l o a t   * d _ i d a t a ,   f l o a t   * d _ o d a t a ) ; 
++ 
++ 
++ 
++ t e m p l a t e   v o i d   r e d u c e < d o u b l e > ( i n t   s i z e ,   i n t   t h r e a d s ,   i n t   b l o c k s ,   i n t   w h i c h K e r n e l ,   d o u b l e   * d _ i d a t a ,   d o u b l e   * d _ o d a t a ) ; 
++ 
++ 
++ 
++ # e n d i f   / /   # i f n d e f   _ R E D U C E _ K E R N E L _ H _ 
++ 
++ 
