@@ -60,9 +60,3 @@ desktop.ini
 warpshift_runtime_check.out
 migrateai_runtime_check.out
 data/benchmark_sample/saxpy
-
-# Private Hackathon / Local Docs
-DEMO_SCRIPT.md
-BUILD_IN_PUBLIC_POSTS.md
-SUBMISSION_CHECKLIST.md
-spec_completo.md
