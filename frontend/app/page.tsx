@@ -385,10 +385,6 @@ export default function Home() {
           </div>
           <div className="flex items-center gap-3">
             <span className="rounded bg-emerald-500/20 border border-emerald-500/30 px-3 py-1.5 text-xs font-bold text-emerald-400 flex items-center gap-2 shadow-[0_0_10px_rgba(16,185,129,0.2)]">
-              <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-              </span>
               Running on AMD Developer Cloud (MI300X Ready)
             </span>
             <span className="rounded bg-[#8d59fe]/25 px-2 py-1.5 text-xs font-medium text-[#cfbcff]">
@@ -656,7 +652,7 @@ export default function Home() {
 
           {activeTab === "benchmark" ? (
             <div className="mt-3 h-48">
-              <ResponsiveContainer width="100%" height="100%">
+              <ResponsiveContainer width="100%" height="100%" minWidth={10} minHeight={10}>
                 <BarChart data={benchmarkData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#3f3f46" />
                   <XAxis dataKey="name" stroke="#a1a1aa" />
