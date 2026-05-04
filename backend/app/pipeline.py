@@ -573,7 +573,7 @@ def _pull_request_preview(
     risks: list[RiskItem] = None,
 ) -> PullRequestPreview:
     risks = risks or []
-    risk_lines = "\n".join(f"- {r.file}:{r.line} - {r.insight}" for r in risks[:5])
+    risk_lines = "\n".join(f"- Line {r.line} - {r.title}" for r in risks[:5])
     if not risk_lines:
         risk_lines = "- No medium/high risks automatically detected."
 
@@ -958,9 +958,7 @@ def run_analysis(
                 level=fix.get("level", "medium"),
                 title=fix.get("issue", "Contextual Fix Required"),
                 description=f"Agent detected patch required on line {fix.get('line_number', 1)}.",
-                file=os.path.basename(repo_files[0]) if repo_files else "source.cu",
                 line=fix.get("line_number", 1),
-                insight=f"Agent fix: Replace `{fix.get('original_line', '')}` with `{fix.get('fixed_line', '')}`",
                 detection_source="agent contextual analysis",
                 confidence="high",
                 effort="low",
@@ -969,7 +967,7 @@ def run_analysis(
             risks.append(r)
             diff_annotations.append(DiffAnnotation(
                 id=f"ann-{r.id}",
-                file=r.file,
+                file=os.path.basename(repo_files[0]) if repo_files else "source.cu",
                 line=r.line,
                 original=fix.get("original_line", ""),
                 converted=fix.get("fixed_line", ""),
@@ -988,7 +986,7 @@ def run_analysis(
             lines_removed=hipify_stats["lines_removed"] or 0,
             github_pr_body=_gemini_pr_body,
             auto_converted=["cudaMalloc -> hipMalloc", "cudaMemcpy -> hipMemcpy", "cudaFree -> hipFree"],
-            flagged_for_review=[r.insight for r in risks if r.level in ("high", "medium")],
+            flagged_for_review=[r.title for r in risks if r.level in ("high", "medium")],
             manual_fix_required=[]
         )
     else:
