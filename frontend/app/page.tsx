@@ -149,6 +149,7 @@ type AnalysisResult = {
   };
   runtime_source: string;
   hipify_coverage_percent: number;
+  has_converted_code?: boolean;
   runtime_status: "pass" | "fail";
   build_system?: string | null;
   build_status: "not_run" | "pass" | "fail";
@@ -416,7 +417,6 @@ export default function Home() {
   return (
     <main className="min-h-screen p-4 text-sm text-zinc-100 selection:bg-[#8d59fe]/30">
       <div className="glass-panel mb-4 rounded-xl p-4 relative overflow-hidden">
-        <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-[#8d59fe] to-transparent opacity-50"></div>
         <div className="flex items-center justify-between relative z-10">
           <div className="flex items-center gap-2">
             <Image
@@ -630,7 +630,7 @@ export default function Home() {
           ) : null}
 
           {/* ── Download Converted Code ── */}
-          {result && (
+          {result?.has_converted_code && (
             <a
               href={`http://134.199.200.190:8000/runs/${result.run_id}/download`}
               target="_blank"

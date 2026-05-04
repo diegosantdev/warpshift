@@ -103,5 +103,6 @@ class AnalysisResult(BaseModel):
     evidence_file: str | None = None
     repo_commit: str | None = None
     hipify_coverage_percent: int = 0
+    has_converted_code: bool = False
     runtime_status: Literal["not_run", "pass", "fail"] = "not_run"
 

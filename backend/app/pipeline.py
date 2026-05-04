@@ -851,7 +851,7 @@ def run_analysis(
 
     medium = sum(1 for r in risks if r.level == "medium")
     high = sum(1 for r in risks if r.level == "high")
-    score = 91 if req.mode == "full" else max(52, 92 - (high * 18 + medium * 7))
+    score = max(52, 92 - (high * 18 + medium * 7))
     confidence = 90 if runtime_source == "repo-scan" else (88 if req.mode == "full" else 82)
 
     # Use real GPU-measured timing when available from Stage 3 SAXPY execution.
@@ -959,6 +959,7 @@ def run_analysis(
         repo_commit=repo_commit,
         runtime_status=runtime_status_value,
         hipify_coverage_percent=hipify_coverage,
+        has_converted_code=bool(converted_zip_path),
     )
 
     real_pr_url = None
