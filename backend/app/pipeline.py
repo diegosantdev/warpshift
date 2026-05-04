@@ -433,152 +433,7 @@ def _compute_confidence(build_status: str, runtime_status: str, runtime_source: 
     return max(35, min(95, value))
 
 
-def _mock_risks() -> list[RiskItem]:
-    return [
-        RiskItem(
-            id="risk-cudnn-custom-op",
-            level="high",
-            title="cuDNN custom ops detected",
-            description="No stable ROCm equivalent for this custom op path.",
-            detection_source="dependency scan",
-            line=96,
-            confidence="high",
-            effort="high ~2h+",
-            fix="Manual rewrite required",
-            blocking=True,
-        ),
-        RiskItem(
-            id="risk-warpsize",
-            level="medium",
-            title="warpSize hardcoded as 32",
-            description="AMD CDNA wavefront is 64; hardcoded 32 can break reductions.",
-            detection_source="static analysis",
-            line=87,
-            confidence="high",
-            effort="low ~5min",
-            fix="Replace literal with hipWarpSize",
-        ),
-        RiskItem(
-            id="risk-cublas-order",
-            level="medium",
-            title="cuBLAS argument ordering mismatch",
-            description="rocBLAS operation enums and arg order differ from cuBLAS.",
-            detection_source="static analysis",
-            line=234,
-            confidence="high",
-            effort="medium ~30min",
-            fix="Review and update rocBLAS call signature",
-        ),
-        RiskItem(
-            id="risk-dynamic-launch",
-            level="low",
-            title="Dynamic kernel launch macro incompatible",
-            description="Macro-based CUDA launch pattern not directly converted by HIPIFY.",
-            detection_source="runtime validation",
-            line=156,
-            confidence="medium",
-            effort="medium ~30min",
-            fix="Use hipLaunchKernelGGL with explicit args",
-        ),
-    ]
-
-
-def _insights() -> list[Insight]:
-    return [
-        Insight(
-            risk_id="risk-warpsize",
-            summary="Hardcoded warpSize breaks on AMD wavefront 64.",
-            impact=[
-                "Thread divergence risk in reduction loops",
-                "Incorrect results in warp-level operations",
-            ],
-            fix_applied="Replaced literal 32 with hipWarpSize",
-            manual_review="no",
-        ),
-        Insight(
-            risk_id="risk-cublas-order",
-            summary="rocBLAS namespace and argument order differ from cuBLAS.",
-            impact=[
-                "Call can compile and still return wrong math output",
-                "Potential silent numerical corruption",
-            ],
-            fix_applied="Updated to rocblas_operation_* and corrected arg ordering",
-            manual_review="yes, validate alpha/beta and leading dimensions",
-        ),
-    ]
-
-
-def _diff_annotations() -> list[DiffAnnotation]:
-    anchor = load_real_anchor()
-    if anchor and anchor.get("warp_detection", {}).get("found"):
-        warp_line = int(anchor["warp_detection"]["line"])
-        warp_text = anchor["warp_detection"]["content"]
-        converted = warp_text.replace("32", "hipWarpSize")
-        return [
-            DiffAnnotation(
-                id="ann-warpsize-real",
-                file=anchor.get("source_relative_path", "reduction_kernel.cu"),
-                line=warp_line,
-                original=warp_text,
-                converted=converted,
-                detection_source="static analysis (real anchor)",
-                confidence="high",
-                effort="low ~5min",
-                insight=Insight(
-                    risk_id="risk-warpsize",
-                    summary="Real anchor detected hardcoded warp-width assumption.",
-                    impact=[
-                        "Wavefront mismatch can break reduction assumptions on CDNA",
-                        "Potential silent correctness issues under lane-sensitive logic",
-                    ],
-                    fix_applied="Replace hardcoded width with hipWarpSize/runtime-safe query",
-                    manual_review="yes, verify all lane-mask math paths",
-                ),
-            )
-        ]
-
-    return [
-        DiffAnnotation(
-            id="ann-warpsize",
-            file="kernel_reduction.hip",
-            line=87,
-            original="int warpSize = 32;",
-            converted="int warpSize = hipWarpSize;",
-            detection_source="static analysis",
-            confidence="high",
-            effort="low ~5min",
-            insight=Insight(
-                risk_id="risk-warpsize",
-                summary="Hardcoded warpSize breaks on AMD wavefront 64.",
-                impact=[
-                    "Thread divergence risk in reduction loops",
-                    "Incorrect results in warp-level operations",
-                ],
-                fix_applied="Replaced literal 32 with hipWarpSize",
-                manual_review="no",
-            ),
-        ),
-        DiffAnnotation(
-            id="ann-cublas",
-            file="gemm_bridge.hip",
-            line=234,
-            original="cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, ...);",
-            converted="rocblas_sgemm(handle, rocblas_operation_none, rocblas_operation_none, ...);",
-            detection_source="static analysis",
-            confidence="high",
-            effort="medium ~30min",
-            insight=Insight(
-                risk_id="risk-cublas-order",
-                summary="rocBLAS namespace and argument order differ from cuBLAS.",
-                impact=[
-                    "Will compile but produce incorrect output if order remains unchanged",
-                    "Silent wrong results in BLAS paths",
-                ],
-                fix_applied="Updated rocBLAS enums and parameter order",
-                manual_review="yes, check alpha/beta and lda/ldb/ldc",
-            ),
-        ),
-    ]
+# Mocks removed
 
 
 def _pull_request_preview(
@@ -656,35 +511,7 @@ def append_history(result: AnalysisResult, github_url: str) -> None:
 
 
 def get_history() -> list[dict]:
-    history = _load_history()
-    if history:
-        return history
-    return [
-        {
-            "run_id": "A1023",
-            "timestamp_utc": "2026-05-04T14:32:00+00:00",
-            "github_url": "https://github.com/user/cuda-reduction",
-            "migration_score": 78,
-            "migration_confidence": 82,
-            "decision": "proceed_with_caution",
-        },
-        {
-            "run_id": "A1019",
-            "timestamp_utc": "2026-05-04T10:18:00+00:00",
-            "github_url": "https://github.com/user/llama-custom-op",
-            "migration_score": 64,
-            "migration_confidence": 80,
-            "decision": "do_not_migrate_yet",
-        },
-        {
-            "run_id": "A1004",
-            "timestamp_utc": "2026-05-03T22:02:00+00:00",
-            "github_url": "https://github.com/user/attention-kernel",
-            "migration_score": 85,
-            "migration_confidence": 88,
-            "decision": "proceed_with_caution",
-        },
-    ]
+    return _load_history()
 
 
 def get_demo_repo_candidates() -> list[str]:
@@ -754,7 +581,9 @@ def run_analysis(
     - Returns real GPU timing in BenchmarkResult
     """
     random.seed(req.github_url)
-    risks = _mock_risks()
+    risks: list[RiskItem] = []
+    insights: list[Insight] = []
+    diff_annotations: list[DiffAnnotation] = []
 
     # Best-effort repo clone — never let git failure crash the whole request.
     repo_dir: str | None = None
@@ -795,84 +624,59 @@ def run_analysis(
             repo_files[0] if repo_files else None,
         )
 
-        # Rebuild risk list from real signals when available.
         rebuilt: list[RiskItem] = []
         if repo_signals.get("cudnn"):
-            file_path, line_no, _ = repo_signals["cudnn"]
-            rebuilt.append(
-                RiskItem(
-                    id="risk-cudnn-custom-op",
-                    level="high",
-                    title="cuDNN usage detected",
-                    description=f"Detected from {os.path.relpath(file_path, repo_dir)}.",
-                    detection_source="dependency scan (repo)",
-                    line=line_no,
-                    confidence="high",
-                    effort="high ~2h+",
-                    fix="Manual migration review required",
-                    blocking=True,
-                )
+            file_path, line_no, content = repo_signals["cudnn"]
+            r = RiskItem(
+                id="risk-cudnn-custom-op", level="high", title="cuDNN usage detected",
+                description=f"Detected from {os.path.relpath(file_path, repo_dir)}.",
+                detection_source="dependency scan (repo)", line=line_no, confidence="high",
+                effort="high ~2h+", fix="Manual migration review required", blocking=True,
             )
+            rebuilt.append(r)
+            insight = Insight(risk_id=r.id, summary="cuDNN custom ops detected", impact=[r.description], fix_applied=r.fix or "", manual_review="yes")
+            insights.append(insight)
+            diff_annotations.append(DiffAnnotation(id=f"ann-{r.id}", file=os.path.relpath(file_path, repo_dir), line=line_no, original=content, converted="// MIOpen rewrite needed", detection_source=r.detection_source, confidence=r.confidence, effort=r.effort, insight=insight))
+
         if repo_signals.get("warp"):
-            file_path, line_no, _ = repo_signals["warp"]
-            rebuilt.append(
-                RiskItem(
-                    id="risk-warpsize",
-                    level="medium",
-                    title="warp-width assumption detected",
-                    description=f"Found warp-sensitive constant in {os.path.relpath(file_path, repo_dir)}.",
-                    detection_source="static analysis (repo)",
-                    line=line_no,
-                    confidence="high",
-                    effort="low ~5min",
-                    fix="Use hipWarpSize or runtime-safe lane logic",
-                )
+            file_path, line_no, content = repo_signals["warp"]
+            r = RiskItem(
+                id="risk-warpsize", level="medium", title="warp-width assumption detected",
+                description=f"Found warp-sensitive constant in {os.path.relpath(file_path, repo_dir)}.",
+                detection_source="static analysis (repo)", line=line_no, confidence="high",
+                effort="low ~5min", fix="Use hipWarpSize or runtime-safe lane logic",
             )
+            rebuilt.append(r)
+            insight = Insight(risk_id=r.id, summary="Hardcoded warpSize breaks on AMD wavefront 64.", impact=[r.description], fix_applied=r.fix or "", manual_review="no")
+            insights.append(insight)
+            diff_annotations.append(DiffAnnotation(id=f"ann-{r.id}", file=os.path.relpath(file_path, repo_dir), line=line_no, original=content, converted=content.replace("32", "hipWarpSize"), detection_source=r.detection_source, confidence=r.confidence, effort=r.effort, insight=insight))
+
         if repo_signals.get("cublas"):
-            file_path, line_no, _ = repo_signals["cublas"]
-            rebuilt.append(
-                RiskItem(
-                    id="risk-cublas-order",
-                    level="medium",
-                    title="cuBLAS call detected",
-                    description=f"Manual review needed for rocBLAS arg semantics in {os.path.relpath(file_path, repo_dir)}.",
-                    detection_source="static analysis (repo)",
-                    line=line_no,
-                    confidence="high",
-                    effort="medium ~30min",
-                    fix="Review enum and argument compatibility for rocBLAS",
-                )
+            file_path, line_no, content = repo_signals["cublas"]
+            r = RiskItem(
+                id="risk-cublas-order", level="medium", title="cuBLAS call detected",
+                description=f"Manual review needed for rocBLAS arg semantics in {os.path.relpath(file_path, repo_dir)}.",
+                detection_source="static analysis (repo)", line=line_no, confidence="high",
+                effort="medium ~30min", fix="Review enum and argument compatibility for rocBLAS",
             )
+            rebuilt.append(r)
+            insight = Insight(risk_id=r.id, summary="rocBLAS namespace and argument order differ from cuBLAS.", impact=[r.description], fix_applied=r.fix or "", manual_review="yes")
+            insights.append(insight)
+            diff_annotations.append(DiffAnnotation(id=f"ann-{r.id}", file=os.path.relpath(file_path, repo_dir), line=line_no, original=content, converted=content.replace("cublas", "rocblas_"), detection_source=r.detection_source, confidence=r.confidence, effort=r.effort, insight=insight))
+
         if repo_signals.get("dynamic_launch"):
-            file_path, line_no, _ = repo_signals["dynamic_launch"]
-            rebuilt.append(
-                RiskItem(
-                    id="risk-dynamic-launch",
-                    level="low",
-                    title="Macro-based kernel launch detected",
-                    description=f"Pattern found in {os.path.relpath(file_path, repo_dir)}.",
-                    detection_source="runtime validation (repo)",
-                    line=line_no,
-                    confidence="medium",
-                    effort="medium ~30min",
-                    fix="Expand macro to explicit hipLaunchKernelGGL call",
-                )
+            file_path, line_no, content = repo_signals["dynamic_launch"]
+            r = RiskItem(
+                id="risk-dynamic-launch", level="low", title="Macro-based kernel launch detected",
+                description=f"Pattern found in {os.path.relpath(file_path, repo_dir)}.",
+                detection_source="runtime validation (repo)", line=line_no, confidence="medium",
+                effort="medium ~30min", fix="Expand macro to explicit hipLaunchKernelGGL call",
             )
-        if repo_signals.get("dynamic_launch"):
-            file_path, line_no, _ = repo_signals["dynamic_launch"]
-            rebuilt.append(
-                RiskItem(
-                    id="risk-dynamic-launch",
-                    level="low",
-                    title="Macro-based kernel launch detected",
-                    description=f"Pattern found in {os.path.relpath(file_path, repo_dir)}.",
-                    detection_source="runtime validation (repo)",
-                    line=line_no,
-                    confidence="medium",
-                    effort="medium ~30min",
-                    fix="Expand macro to explicit hipLaunchKernelGGL call",
-                )
-            )
+            rebuilt.append(r)
+            insight = Insight(risk_id=r.id, summary="Dynamic kernel launch macro incompatible", impact=[r.description], fix_applied=r.fix or "", manual_review="yes")
+            insights.append(insight)
+            diff_annotations.append(DiffAnnotation(id=f"ann-{r.id}", file=os.path.relpath(file_path, repo_dir), line=line_no, original=content, converted=content.replace("<<<", "hipLaunchKernelGGL(").replace(">>>", ")"), detection_source=r.detection_source, confidence=r.confidence, effort=r.effort, insight=insight))
+
         # For real repos, ALWAYS use the real risks, even if empty (no fallback to mock)
         risks = rebuilt
 
@@ -940,7 +744,7 @@ def run_analysis(
         performance_delta_percent=round(((rocm - cuda) / cuda) * 100, 1),
     )
 
-    diff_annotations = _diff_annotations()
+    # Removed mock diff_annotations
     hipify_artifacts: list[dict] = []
     hipify_stats = {"files_changed": 0, "lines_added": 0, "lines_removed": 0, "tool": None}
     if repo_files:
@@ -1004,7 +808,7 @@ def run_analysis(
         migration_confidence=confidence,
         estimated_effort="4-8 hours manual",
         risk_items=risks,
-        insights=_insights(),
+        insights=insights,
         benchmark=benchmark,
         decision_engine=_decision(risks),
         diff_annotations=diff_annotations,
