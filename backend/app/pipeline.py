@@ -63,7 +63,7 @@ def _prepare_repo(repo_url: str) -> tuple[str | None, str | None]:
         return None, None
     base_url, subpath = _parse_github_url(repo_url)
     os.makedirs(REPO_CACHE_DIR, exist_ok=True)
-    repo_dir = _safe_repo_dir(base_url)
+    repo_dir = _safe_repo_dir(repo_url)
     try:
         if not os.path.exists(os.path.join(repo_dir, ".git")):
             _run(["git", "clone", "--depth", "1", base_url, repo_dir])
