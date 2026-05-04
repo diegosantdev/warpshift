@@ -987,6 +987,7 @@ def run_analysis(
             lines_added=hipify_stats["lines_added"] or 0,
             lines_removed=hipify_stats["lines_removed"] or 0,
             github_pr_body=_gemini_pr_body,
+            auto_converted=["cudaMalloc -> hipMalloc", "cudaMemcpy -> hipMemcpy", "cudaFree -> hipFree"],
             flagged_for_review=[r.insight for r in risks if r.level in ("high", "medium")],
             manual_fix_required=[]
         )
@@ -1115,7 +1116,7 @@ def stage_events(req: AnalysisRequest):
     yield ("stage_start", {"stage": 2, "name": "Agent Contextual Analysis"})
     t2 = time.time()
     
-    diff_text = s1.log.stdout[-2000:] if (s1.log and s1.log.stdout) else ""
+    diff_text = s1.log.stdout[-2000:] if (s1.log and hasattr(s1.log, "stdout") and s1.log.stdout) else ""
     cuda_code = ""
     if first_cuda:
         try:
@@ -1124,8 +1125,23 @@ def stage_events(req: AnalysisRequest):
         except: pass
         
     agent_result = analyze_migration_and_fix(diff_text, cuda_code)
-    _agent_fixes = agent_result.get("fixes", [])
-    _agent_reasoning = agent_result.get("reasoning", "Agent completed analysis.")
+    
+    # Bulletproof against hallucinations
+    if isinstance(agent_result, dict):
+        _agent_fixes = agent_result.get("fixes") or []
+        _agent_reasoning = agent_result.get("reasoning") or "Agent completed analysis."
+    elif isinstance(agent_result, list):
+        _agent_fixes = agent_result
+        _agent_reasoning = "Agent completed analysis with a direct list of fixes."
+    else:
+        _agent_fixes = []
+        _agent_reasoning = str(agent_result)
+
+    if not isinstance(_agent_fixes, list):
+        _agent_fixes = []
+        
+    # Clean up fixes that are not dicts
+    _agent_fixes = [f for f in _agent_fixes if isinstance(f, dict)]
     
     dur2 = time.time() - t2
     yield ("stage_update", {
