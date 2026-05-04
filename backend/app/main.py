@@ -71,8 +71,11 @@ def rocm_info():
     info["rocm_smi"] = out3[:300] if out3 else "unavailable"
 
     rc4, out4 = _run(["rocminfo"])
-    # Look for MI300X / gfx942
-    mi300x = any("MI300" in line or "gfx942" in line for line in out4.splitlines())
+    # Look for MI300X /            # Check for any MI300X variant (VF = Virtual Function in cloud)
+    mi300x = any(
+        "MI300" in line or "gfx942" in line or "0x74b5" in line
+        for line in out4.splitlines()
+    )
     info["mi300x_detected"] = mi300x
     info["rocminfo_snippet"] = "\n".join(
         l for l in out4.splitlines() if "MI300" in l or "gfx942" in l or "Name:" in l
