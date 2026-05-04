@@ -202,7 +202,7 @@ export default function Home() {
     if (!result) return;
     setPublishingPR(true);
     try {
-      const response = await fetch(`http://localhost:8000/runs/${result.run_id}/create-pr`, { method: "POST" });
+      const response = await fetch(`http://134.199.200.190:8000/runs/${result.run_id}/create-pr`, { method: "POST" });
       const data = await response.json();
       if (data.status === "ok") {
         setResult((prev) => prev ? {
@@ -246,7 +246,7 @@ export default function Home() {
   }, [anchorStatus]);
 
   const loadHistory = async () => {
-    const response = await fetch("http://localhost:8000/history");
+    const response = await fetch("http://134.199.200.190:8000/history");
     const payload = (await response.json()) as { items: HistoryItem[] };
     if (payload.items?.length) {
       setHistory(payload.items);
@@ -255,11 +255,11 @@ export default function Home() {
 
   useEffect(() => {
     loadHistory().catch(() => null);
-    fetch("http://localhost:8000/demo-repos")
+    fetch("http://134.199.200.190:8000/demo-repos")
       .then((r) => r.json())
       .then((d: { items: string[] }) => setDemoRepos(d.items || []))
       .catch(() => null);
-    fetch("http://localhost:8000/anchor/status")
+    fetch("http://134.199.200.190:8000/anchor/status")
       .then((r) => r.json())
       .then((d: AnchorStatus) => setAnchorStatus(d))
       .catch(() => null);
@@ -277,7 +277,7 @@ export default function Home() {
   const benchmarkData = useMemo(() => {
     if (!result) return [];
     return [
-      { name: "CUDA A100", value: result.benchmark.cuda_baseline_ms },
+      { name: "CUDA V100", value: result.benchmark.cuda_baseline_ms },
       { name: "ROCm MI300X", value: result.benchmark.rocm_live_ms },
     ];
   }, [result]);
@@ -320,7 +320,7 @@ export default function Home() {
       githubUrl.startsWith("http://") || githubUrl.startsWith("https://")
         ? githubUrl
         : fallbackRepo;
-    const url = new URL("http://localhost:8000/analyze/stream");
+    const url = new URL("http://134.199.200.190:8000/analyze/stream");
     url.searchParams.set("github_url", effectiveUrl);
     url.searchParams.set("mode", mode);
 
@@ -357,7 +357,7 @@ export default function Home() {
       setResult(payload);
       setRunning(false);
       loadHistory().catch(() => null);
-      fetch(`http://localhost:8000/runs/${payload.run_id}`)
+      fetch(`http://134.199.200.190:8000/runs/${payload.run_id}`)
         .then((r) => r.json())
         .then((d: { evidence: unknown }) =>
           setRunEvidence(JSON.stringify(d.evidence, null, 2)),
@@ -698,7 +698,8 @@ export default function Home() {
               </div>
               {result ? (
                 <p className="mt-2 text-xs text-zinc-400">
-                  Delta: +{result.benchmark.performance_delta_percent}% |{" "}
+                  Delta: {result.benchmark.performance_delta_percent}% |{" "}
+                  Speedup: {(result.benchmark.cuda_baseline_ms / result.benchmark.rocm_live_ms).toFixed(1)}x vs V100 |{" "}
                   {result.benchmark.hardware} | {result.benchmark.rocm_version}
                 </p>
               ) : null}

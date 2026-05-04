@@ -246,13 +246,17 @@ def _scan_repo_signals(files: list[str]) -> dict:
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as fp:
                 for line_no, line in enumerate(fp, start=1):
+                    # Catch warpSize assumptions
                     if signals["warp"] is None and (re.search(r"\bwarpSize\b\s*=\s*32\b", line) or "& 31" in line):
                         signals["warp"] = (file_path, line_no, line.strip())
+                    # Catch cuBLAS
                     if signals["cublas"] is None and "cublas" in line.lower():
                         signals["cublas"] = (file_path, line_no, line.strip())
+                    # Catch cuDNN
                     if signals["cudnn"] is None and "cudnn" in line.lower():
                         signals["cudnn"] = (file_path, line_no, line.strip())
-                    if signals["dynamic_launch"] is None and "LAUNCH_" in line:
+                    # Catch dynamic launches or custom macros
+                    if signals["dynamic_launch"] is None and ("LAUNCH_" in line or "<<<" in line):
                         signals["dynamic_launch"] = (file_path, line_no, line.strip())
         except Exception:
             continue
@@ -854,8 +858,24 @@ def run_analysis(
                     fix="Expand macro to explicit hipLaunchKernelGGL call",
                 )
             )
-        if rebuilt:
-            risks = rebuilt
+        if repo_signals.get("dynamic_launch"):
+            file_path, line_no, _ = repo_signals["dynamic_launch"]
+            rebuilt.append(
+                RiskItem(
+                    id="risk-dynamic-launch",
+                    level="low",
+                    title="Macro-based kernel launch detected",
+                    description=f"Pattern found in {os.path.relpath(file_path, repo_dir)}.",
+                    detection_source="runtime validation (repo)",
+                    line=line_no,
+                    confidence="medium",
+                    effort="medium ~30min",
+                    fix="Expand macro to explicit hipLaunchKernelGGL call",
+                )
+            )
+        # For real repos, ALWAYS use the real risks, even if empty (no fallback to mock)
+        risks = rebuilt
+
 
     # ── Stage 3: Real GPU SAXPY (always when backend_mode=real) ──────────────
     # Runs regardless of repo clone success — this is what elevates
