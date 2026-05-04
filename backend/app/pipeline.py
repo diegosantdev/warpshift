@@ -52,29 +52,32 @@ def _safe_repo_dir(repo_url: str) -> str:
     return os.path.join(REPO_CACHE_DIR, key[:120])
 
 
+def _parse_github_url(url: str) -> tuple[str, str | None]:
+    match = re.match(r"(https?://github\.com/[^/]+/[^/]+)(?:/(?:tree|blob)/[^/]+/(.*))?", url)
+    if match:
+        return match.group(1), match.group(2)
+    return url, None
+
+
 def _prepare_repo(repo_url: str) -> tuple[str | None, str | None]:
     if not repo_url.startswith("http://") and not repo_url.startswith("https://"):
         return None, None
+    base_url, subpath = _parse_github_url(repo_url)
     os.makedirs(REPO_CACHE_DIR, exist_ok=True)
-    repo_dir = _safe_repo_dir(repo_url)
+    repo_dir = _safe_repo_dir(base_url)
     try:
         if not os.path.exists(os.path.join(repo_dir, ".git")):
-            if "NVIDIA/cuda-samples" in repo_url:
-                # Sparse checkout to only get vectorAdd for 20s demo speed
-                os.makedirs(repo_dir, exist_ok=True)
-                _run(["git", "init"], cwd=repo_dir)
-                _run(["git", "remote", "add", "-f", "origin", repo_url], cwd=repo_dir)
-                _run(["git", "config", "core.sparseCheckout", "true"], cwd=repo_dir)
-                with open(os.path.join(repo_dir, ".git", "info", "sparse-checkout"), "w") as fp:
-                    fp.write("Samples/0_Introduction/vectorAdd/\n")
-                _run(["git", "pull", "origin", "master"], cwd=repo_dir)
-            else:
-                _run(["git", "clone", "--depth", "1", repo_url, repo_dir])
+            _run(["git", "clone", "--depth", "1", base_url, repo_dir])
         else:
             _run(["git", "fetch", "--depth", "1", "origin"], cwd=repo_dir)
             _run(["git", "reset", "--hard", "FETCH_HEAD"], cwd=repo_dir)
         commit = _run(["git", "rev-parse", "HEAD"], cwd=repo_dir).stdout.strip()
-        return repo_dir, commit
+        
+        target_dir = os.path.join(repo_dir, subpath) if subpath else repo_dir
+        if not os.path.exists(target_dir):
+            target_dir = repo_dir
+            
+        return target_dir, commit
     except Exception as exc:
         print(f"[WARPSHIFT ERROR] _prepare_repo failed for {repo_url}: {exc}", flush=True)
         try:
