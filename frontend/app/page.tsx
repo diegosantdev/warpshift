@@ -496,9 +496,9 @@ export default function Home() {
             <button
               onClick={runMigration}
               disabled={running}
-              className="inline-flex items-center gap-1 rounded bg-[#8d59fe] px-3 py-1 font-semibold text-white disabled:opacity-50 transition-all"
+              className="inline-flex items-center gap-1 rounded bg-[#8d59fe] px-3 py-1 font-semibold text-white disabled:opacity-50 transition-all whitespace-nowrap"
             >
-              {running ? "AGENT ANALYZING REPOSITORY..." : "MIGRATE"}
+              {running ? "AGENT ANALYZING..." : "MIGRATE"}
               {!running ? <ArrowRightIcon /> : null}
             </button>
           </div>
@@ -543,7 +543,7 @@ export default function Home() {
                       {stage.detail}
                     </div>}
                     {stage.log?.stdout && (
-                      <div className="opacity-70 whitespace-pre-wrap break-words leading-relaxed pl-3 border-l border-zinc-800">
+                      <div className="opacity-70 whitespace-pre-wrap break-all leading-relaxed pl-3 border-l border-zinc-800">
                         {stage.log.stdout.trim().split('\n').filter(Boolean).slice(-3).join('\n')}
                       </div>
                     )}
