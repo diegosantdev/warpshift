@@ -714,6 +714,15 @@ export default function Home() {
 
           {activeTab === "benchmark" ? (
             <div className="mt-3">
+              {result && result.benchmark.performance_delta_percent > 0 && (
+                <div className="flex items-center justify-end mb-2">
+                  <div className="bg-emerald-500/10 border border-emerald-500/20 px-3 py-1 rounded-lg text-emerald-400 flex items-center gap-2">
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                    <span className="font-bold text-xl">{(result.benchmark.performance_delta_percent / 100 + 1).toFixed(1)}x</span>
+                    <span className="text-xs font-semibold tracking-wide uppercase opacity-80">Faster on MI300X</span>
+                  </div>
+                </div>
+              )}
               <div className="h-48 w-full">
                 <ResponsiveContainer width="100%" height="100%" minWidth={10} minHeight={10}>
                   <BarChart data={benchmarkData}>
