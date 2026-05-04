@@ -433,7 +433,6 @@ export default function Home() {
           </div>
           <div className="flex items-center gap-3">
             <span className="rounded bg-emerald-500/20 border border-emerald-500/30 px-3 py-1.5 text-xs font-bold text-emerald-400 flex items-center gap-2 shadow-[0_0_10px_rgba(16,185,129,0.2)]">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
               MI300X Live · hipcc+gpu
             </span>
             <span className="rounded bg-[#8d59fe]/25 px-2 py-1.5 text-xs font-medium text-[#cfbcff]">
