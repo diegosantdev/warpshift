@@ -732,7 +732,7 @@ def _decision(risks: list[RiskItem]) -> DecisionEngineResult:
     )
 
 
-def run_analysis(req: AnalysisRequest) -> AnalysisResult:
+def run_analysis(req: AnalysisRequest, real_bench_ms: float | None = None) -> AnalysisResult:
     random.seed(req.github_url)
     risks = _mock_risks()
     repo_dir, repo_commit = _prepare_repo(req.github_url)
@@ -850,8 +850,9 @@ def run_analysis(req: AnalysisRequest) -> AnalysisResult:
     score = 91 if req.mode == "full" else max(52, 92 - (high * 18 + medium * 7))
     confidence = 90 if runtime_source == "repo-scan" else (88 if req.mode == "full" else 82)
 
+    # Use real GPU-measured timing when available from Stage 3 SAXPY execution
     cuda = 120.0
-    rocm = 135.0 if req.mode == "live" else 129.0
+    rocm = real_bench_ms if (real_bench_ms is not None and real_bench_ms > 0) else (135.0 if req.mode == "live" else 129.0)
     benchmark = BenchmarkResult(
         cuda_baseline_ms=cuda,
         rocm_live_ms=rocm,
@@ -997,19 +998,21 @@ def run_analysis(req: AnalysisRequest) -> AnalysisResult:
 
 def stage_events(req: AnalysisRequest):
     repo_dir, _ = _prepare_repo(req.github_url)
-    repo_files = _collect_cuda_files(repo_dir, limit=1) if repo_dir else []
+    repo_files = _collect_cuda_files(repo_dir, limit=6) if repo_dir else []
+    first_cuda = repo_files[0] if repo_files else None
+
     yield ("stage_start", {"stage": 1, "name": "HIPIFY Conversion"})
-    s1 = run_hipify_stage(req.github_url)
+    s1 = run_hipify_stage(req.github_url, cuda_file=first_cuda)
     yield ("stage_update", {"stage": 1, "progress": 65, "status": s1.status, "detail": s1.detail})
     time.sleep(settings.stage_delay_seconds)
 
     yield ("stage_start", {"stage": 2, "name": "Static Analysis"})
-    s2 = run_static_analysis_stage()
+    s2 = run_static_analysis_stage(cuda_files=repo_files if repo_files else None)
     yield ("stage_update", {"stage": 2, "progress": 100, "status": s2.status, "detail": s2.detail})
     time.sleep(settings.stage_delay_seconds)
 
     yield ("stage_start", {"stage": 3, "name": "Runtime Validation"})
-    s3 = run_runtime_validation_stage(req.mode, repo_files[0] if repo_files else None)
+    s3 = run_runtime_validation_stage(req.mode, first_cuda)
     if s3.status == "failed":
         yield (
             "runtime_error",
@@ -1022,6 +1025,11 @@ def stage_events(req: AnalysisRequest):
         yield ("stage_update", {"stage": 3, "progress": 100, "status": s3.status, "detail": s3.detail})
     time.sleep(settings.stage_delay_seconds)
 
+    # Extract real GPU timing from stage 3 log for use in run_analysis benchmark
+    real_bench_ms: float | None = None
+    if s3.log and isinstance(s3.log.toolchain, dict):
+        real_bench_ms = s3.log.toolchain.get("bench_ms")
+
     yield ("stage_start", {"stage": 4, "name": "AI Explanation Layer"})
     s4 = run_ai_explanation_stage(
         issue_description="warpSize hardcoded as 32 breaks on AMD wavefront 64.",
@@ -1032,7 +1040,7 @@ def stage_events(req: AnalysisRequest):
     )
     yield ("stage_update", {"stage": 4, "progress": 100, "status": s4.status, "detail": s4.detail})
 
-    result = run_analysis(req)
+    result = run_analysis(req, real_bench_ms=real_bench_ms)
     yield ("completed", result.model_dump(mode="json"))
 
 
