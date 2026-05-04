@@ -41,7 +41,10 @@ REPO_CACHE_DIR = os.path.join(DATA_DIR, "repo-cache")
 
 
 def _run(cmd: list[str], cwd: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=cwd, check=True, text=True, capture_output=True)
+    try:
+        return subprocess.run(cmd, cwd=cwd, check=True, text=True, capture_output=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(f"Command '{' '.join(cmd)}' failed with exit code {exc.returncode}. Stderr: {exc.stderr}") from exc
 
 
 def _safe_repo_dir(repo_url: str) -> str:
@@ -72,7 +75,8 @@ def _prepare_repo(repo_url: str) -> tuple[str | None, str | None]:
             _run(["git", "reset", "--hard", "origin/HEAD"], cwd=repo_dir)
         commit = _run(["git", "rev-parse", "HEAD"], cwd=repo_dir).stdout.strip()
         return repo_dir, commit
-    except Exception:
+    except Exception as exc:
+        print(f"[WARPSHIFT ERROR] _prepare_repo failed for {repo_url}: {exc}", flush=True)
         return None, None
 
 
