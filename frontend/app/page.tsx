@@ -87,6 +87,8 @@ type Stage = {
   status: "idle" | "running" | "done" | "failed";
   duration_s?: number;
   gpu_ms?: number;
+  detail?: string;
+  log?: any;
 };
 
 type RiskItem = {
@@ -325,10 +327,10 @@ export default function Home() {
     });
 
     stream.addEventListener("stage_update", (evt) => {
-      const payload = JSON.parse((evt as MessageEvent).data) as { stage: number, status?: string, duration_s?: number, gpu_ms?: number };
+      const payload = JSON.parse((evt as MessageEvent).data) as { stage: number, status?: string, duration_s?: number, gpu_ms?: number, detail?: string, log?: any };
       setStages((prev) =>
         prev.map((s) =>
-          s.stage === payload.stage ? { ...s, status: (payload.status as any) || "done", duration_s: payload.duration_s, gpu_ms: payload.gpu_ms } : s,
+          s.stage === payload.stage ? { ...s, status: (payload.status as any) || "done", duration_s: payload.duration_s, gpu_ms: payload.gpu_ms, detail: payload.detail, log: payload.log } : s,
         ),
       );
     });
@@ -502,36 +504,51 @@ export default function Home() {
           </div>
           <div className="space-y-2">
             {stages.map((stage) => (
-              <div key={stage.stage} className="glass-card rounded p-3 flex items-center justify-between">
-                <div>
-                  <p className="font-medium text-zinc-200 flex items-center gap-2">
-                    Stage {stage.stage}: {stage.name}
-                    {stage.status === "done" && stage.duration_s !== undefined && (
-                      <span className="text-[10px] font-mono text-zinc-500 font-normal">
-                        ({stage.duration_s < 0.1 ? "<0.1" : stage.duration_s.toFixed(1)}s)
-                      </span>
-                    )}
-                    {stage.status === "done" && stage.gpu_ms !== undefined && (
-                      <span className="text-[10px] font-mono text-emerald-500 font-bold bg-emerald-500/10 px-1.5 py-0.5 rounded flex items-center gap-1">
-                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
-                        {stage.gpu_ms}ms ← MI300X
-                      </span>
-                    )}
-                  </p>
-                  <p className={`text-xs mt-1 font-semibold uppercase tracking-wider ${
-                    stage.status === "running" ? "text-[#cfbcff]" :
-                    stage.status === "done" ? "text-emerald-400" :
-                    stage.status === "failed" ? "text-red-400" : "text-zinc-500"
-                  }`}>
-                    {stage.status}
-                  </p>
+              <div key={stage.stage} className="glass-card rounded p-3 flex flex-col">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="font-medium text-zinc-200 flex items-center gap-2">
+                      Stage {stage.stage}: {stage.name}
+                      {stage.status === "done" && stage.duration_s !== undefined && (
+                        <span className="text-[10px] font-mono text-zinc-500 font-normal">
+                          ({stage.duration_s < 0.1 ? "<0.1" : stage.duration_s.toFixed(1)}s)
+                        </span>
+                      )}
+                      {stage.status === "done" && stage.gpu_ms !== undefined && (
+                        <span className="text-[10px] font-mono text-emerald-500 font-bold bg-emerald-500/10 px-1.5 py-0.5 rounded flex items-center gap-1">
+                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                          {stage.gpu_ms}ms ← MI300X
+                        </span>
+                      )}
+                    </p>
+                    <p className={`text-xs mt-1 font-semibold uppercase tracking-wider ${
+                      stage.status === "running" ? "text-[#cfbcff]" :
+                      stage.status === "done" ? "text-emerald-400" :
+                      stage.status === "failed" ? "text-red-400" : "text-zinc-500"
+                    }`}>
+                      {stage.status}
+                    </p>
+                  </div>
+                  <div className="flex items-center justify-center">
+                    {stage.status === "idle" && <div className="h-2 w-2 rounded-full bg-zinc-600"></div>}
+                    {stage.status === "running" && <div className="h-3 w-3 rounded-full bg-[#8d59fe] animate-pulse-ring"></div>}
+                    {stage.status === "done" && <CheckIcon className="h-4 w-4 text-emerald-400" />}
+                    {stage.status === "failed" && <div className="h-4 w-4 text-red-500 font-bold flex items-center justify-center">×</div>}
+                  </div>
                 </div>
-                <div className="flex items-center justify-center">
-                  {stage.status === "idle" && <div className="h-2 w-2 rounded-full bg-zinc-600"></div>}
-                  {stage.status === "running" && <div className="h-3 w-3 rounded-full bg-[#8d59fe] animate-pulse-ring"></div>}
-                  {stage.status === "done" && <CheckIcon className="h-4 w-4 text-emerald-400" />}
-                  {stage.status === "failed" && <div className="h-4 w-4 text-red-500 font-bold flex items-center justify-center">×</div>}
-                </div>
+                
+                {stage.status !== "idle" && (stage.detail || stage.log?.stdout) && (
+                  <div className="mt-3 bg-zinc-950/80 rounded p-2 text-[10px] font-mono text-zinc-400 border border-zinc-800/50 shadow-inner">
+                    {stage.detail && <div className="text-[#cfbcff] mb-1 flex items-start gap-1">
+                      <span className="text-zinc-500">▶</span> {stage.detail}
+                    </div>}
+                    {stage.log?.stdout && (
+                      <div className="opacity-70 whitespace-pre-wrap break-words leading-relaxed pl-3 border-l border-zinc-800">
+                        {stage.log.stdout.trim().split('\n').filter(Boolean).slice(-3).join('\n')}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             ))}
           </div>
