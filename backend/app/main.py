@@ -151,6 +151,17 @@ def git_pull():
         raise HTTPException(500, f"git pull failed: {exc}")
 
 
+@app.get("/admin/debug")
+def debug_clone():
+    from .pipeline import DATA_DIR
+    import os
+    path = os.path.join(DATA_DIR, "clone_error.txt")
+    if os.path.exists(path):
+        with open(path, "r") as fp:
+            return {"error": fp.read()}
+    return {"error": "No file"}
+
+
 # ── Admin: History ────────────────────────────────────────────────────────────
 
 @app.delete("/admin/clear-history")
