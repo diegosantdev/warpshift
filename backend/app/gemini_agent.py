@@ -1,14 +1,17 @@
 import os
 import re
 import json
+
 try:
     import google.generativeai as genai
 except ImportError:
     genai = None
 
-from dotenv import load_dotenv
-
-load_dotenv()
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 # Initialize Gemini
 API_KEY = os.environ.get("GOOGLE_AI_API_KEY")
