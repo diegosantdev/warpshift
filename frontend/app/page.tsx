@@ -182,7 +182,7 @@ const defaultStages: Stage[] = [
 ];
 
 export default function Home() {
-  const [githubUrl, setGithubUrl] = useState("https://github.com/user/cuda-model");
+  const [githubUrl, setGithubUrl] = useState("");
   const [mode, setMode] = useState<"live" | "full">("live");
   const [stages, setStages] = useState<Stage[]>(defaultStages);
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
@@ -197,6 +197,7 @@ export default function Home() {
   const [showRawJson, setShowRawJson] = useState(false);
   const [running, setRunning] = useState(false);
   const [publishingPR, setPublishingPR] = useState(false);
+  const [downloadingPatch, setDownloadingPatch] = useState(false);
 
   const publishRealPR = async () => {
     if (!result) return;
@@ -217,33 +218,15 @@ export default function Home() {
     }
   };
 
-  const anchorBadge = useMemo(() => {
-    const artifact = anchorStatus?.artifact;
-    if (!artifact || !anchorStatus?.available) {
-      return {
-        label: "NO REAL ARTIFACT",
-        className: "border-[#8d59fe]/50 bg-[#8d59fe]/15 text-[#cfbcff]",
-      };
-    }
-
-    const healthy =
-      artifact.hipify_executed &&
-      Boolean(artifact.diff_preview) &&
-      Boolean(artifact.warp_detection?.found) &&
-      Boolean(artifact.repo_commit);
-
-    if (healthy) {
-      return {
-        label: "Anchored to NVIDIA/cuda-samples",
-        className: "border-[#8d59fe]/50 bg-[#8d59fe]/15 text-[#cfbcff]",
-      };
-    }
-
-    return {
-      label: "FALLBACK ACTIVE (CACHED)",
-      className: "border-[#8d59fe]/50 bg-[#8d59fe]/15 text-[#cfbcff]",
-    };
-  }, [anchorStatus]);
+  const downloadFile = (content: string, filename: string, mime: string) => {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const loadHistory = async () => {
     const response = await fetch("http://134.199.200.190:8000/history");
@@ -258,10 +241,6 @@ export default function Home() {
     fetch("http://134.199.200.190:8000/demo-repos")
       .then((r) => r.json())
       .then((d: { items: string[] }) => setDemoRepos(d.items || []))
-      .catch(() => null);
-    fetch("http://134.199.200.190:8000/anchor/status")
-      .then((r) => r.json())
-      .then((d: AnchorStatus) => setAnchorStatus(d))
       .catch(() => null);
   }, []);
 
@@ -377,30 +356,55 @@ export default function Home() {
     runMigration();
   };
 
-  const exportRiskReport = async (format: "json" | "markdown") => {
-    if (!result) {
-      setExportedReport("Error: No migration result available to export. Please run the migration first.");
-      return;
-    }
+  const exportRiskReport = (format: "json" | "markdown") => {
+    if (!result) return;
     if (format === "markdown") {
       const lines = [
-        "# Pre-Migration Risk Report",
+        "# WarpShift Pre-Migration Risk Report",
         `- Run: ${result.run_id}`,
+        `- Repo: ${githubUrl}`,
         `- Score: ${result.migration_score}/100`,
         `- Confidence: ${result.migration_confidence}%`,
+        `- Hardware: ${result.benchmark.hardware}`,
+        `- rocm_live_ms: ${result.benchmark.rocm_live_ms}ms`,
+        `- Speedup vs V100: ${(result.benchmark.cuda_baseline_ms / result.benchmark.rocm_live_ms).toFixed(1)}x`,
         "",
-        "## Risks",
+        "## Detected Risks",
       ];
       for (const risk of result.risk_items || []) {
-        lines.push(`- [${risk.level.toUpperCase()}] ${risk.title} (source: ${risk.detection_source}, line: ${risk.line || "N/A"})`);
+        lines.push(`- [${risk.level.toUpperCase()}] ${risk.title}`);
+        lines.push(`  - Source: ${risk.detection_source}`);
+        lines.push(`  - Line: ${risk.line ?? "N/A"}`);
+        lines.push(`  - Description: ${risk.description}`);
       }
       lines.push("");
       lines.push("## Decision");
-      lines.push(`- ${result.decision_engine?.decision || "N/A"}`);
-      setExportedReport(lines.join("\n"));
+      lines.push(`- ${result.decision_engine?.decision ?? "N/A"}`);
+      downloadFile(lines.join("\n"), `warpshift-risk-${result.run_id}.md`, "text/markdown");
     } else {
-      setExportedReport(JSON.stringify(result, null, 2));
+      downloadFile(JSON.stringify(result, null, 2), `warpshift-run-${result.run_id}.json`, "application/json");
     }
+  };
+
+  const downloadPatch = () => {
+    if (!result || !result.diff_annotations?.length) return;
+    setDownloadingPatch(true);
+    const lines = [
+      `--- CUDA Source`,
+      `+++ HIP/ROCm Converted`,
+      `# WarpShift Migration Patch`,
+      `# Run: ${result.run_id} | Score: ${result.migration_score}/100`,
+      `# Hardware: ${result.benchmark.hardware}`,
+      "",
+    ];
+    for (const ann of result.diff_annotations) {
+      lines.push(`@@ ${ann.file}:${ann.line} [${ann.confidence.toUpperCase()}] @@`);
+      lines.push(`-${ann.original}`);
+      lines.push(`+${ann.converted}`);
+      lines.push("");
+    }
+    downloadFile(lines.join("\n"), `warpshift-patch-${result.run_id}.patch`, "text/plain");
+    setDownloadingPatch(false);
   };
 
   return (
@@ -416,28 +420,17 @@ export default function Home() {
               height={26}
               className="rounded"
             />
-            <h1 className="text-lg font-semibold">WarpShift - iterative migration workflow</h1>
+            <h1 className="text-lg font-semibold">WarpShift — CUDA to ROCm Migration Agent</h1>
           </div>
           <div className="flex items-center gap-3">
             <span className="rounded bg-emerald-500/20 border border-emerald-500/30 px-3 py-1.5 text-xs font-bold text-emerald-400 flex items-center gap-2 shadow-[0_0_10px_rgba(16,185,129,0.2)]">
-              Running on AMD Developer Cloud (MI300X Ready)
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+              MI300X Live · hipcc+gpu
             </span>
             <span className="rounded bg-[#8d59fe]/25 px-2 py-1.5 text-xs font-medium text-[#cfbcff]">
               ROCm 7.x
             </span>
           </div>
-        </div>
-        <button
-          onClick={runDemoSequence}
-          className="mt-3 rounded bg-[#8d59fe] px-3 py-1 text-xs font-semibold text-white"
-        >
-          Demo Sequence (2 min)
-        </button>
-        <div className={`mt-3 rounded border p-2 text-xs ${anchorBadge.className}`}>
-          <p className="font-semibold">{anchorBadge.label}</p>
-          <p>
-            commit: {(anchorStatus?.artifact?.repo_commit || "n/a").slice(0, 12)}
-          </p>
         </div>
       </div>
 
@@ -470,17 +463,13 @@ export default function Home() {
           <h2 className="mb-3 text-xs font-semibold tracking-wide text-zinc-400">
             PIPELINE
           </h2>
-          <p className="mb-1 text-zinc-400">GitHub URL</p>
+          <p className="mb-1 text-zinc-400">GitHub Repository URL</p>
           <input
-            className="mb-2 w-full rounded border border-zinc-700 bg-zinc-900 px-3 py-2"
+            className="mb-2 w-full rounded border border-zinc-700 bg-zinc-900 px-3 py-2 placeholder:text-zinc-600"
             value={githubUrl}
             onChange={(e) => setGithubUrl(e.target.value)}
+            placeholder="https://github.com/org/cuda-repo"
           />
-          {demoRepos.length ? (
-            <p className="mb-2 text-xs text-zinc-500">
-              Fallback demo repo: {demoRepos[0]}
-            </p>
-          ) : null}
           <div className="mb-2 flex gap-2">
             <button
               onClick={() => setMode("live")}
@@ -645,29 +634,40 @@ export default function Home() {
               onClick={() => setActiveTab("benchmark")}
               className={`rounded px-2 py-1 text-xs ${activeTab === "benchmark" ? "bg-[#8d59fe] text-white" : "bg-zinc-800"}`}
             >
-              SAXPY Benchmark (GPU Validated)
+              GPU Benchmark
             </button>
             <button
               onClick={() => setActiveTab("pr")}
               className={`rounded px-2 py-1 text-xs ${activeTab === "pr" ? "bg-[#8d59fe] text-white" : "bg-zinc-800"}`}
             >
-              PR
+              PR Preview
             </button>
           </div>
-          <div className="mt-2 flex gap-2">
-            <button
-              onClick={() => exportRiskReport("markdown")}
-              className="rounded bg-zinc-800 px-2 py-1 text-xs"
-            >
-              Export Risk MD
-            </button>
-            <button
-              onClick={() => exportRiskReport("json")}
-              className="rounded bg-zinc-800 px-2 py-1 text-xs"
-            >
-              Export Risk JSON
-            </button>
-          </div>
+          {result && (
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button
+                onClick={() => exportRiskReport("markdown")}
+                className="rounded bg-zinc-800 hover:bg-zinc-700 transition-colors px-2 py-1 text-xs flex items-center gap-1"
+              >
+                ↓ Risk Report .md
+              </button>
+              <button
+                onClick={() => exportRiskReport("json")}
+                className="rounded bg-zinc-800 hover:bg-zinc-700 transition-colors px-2 py-1 text-xs flex items-center gap-1"
+              >
+                ↓ Full Report .json
+              </button>
+              {result.diff_annotations?.length > 0 && (
+                <button
+                  onClick={downloadPatch}
+                  disabled={downloadingPatch}
+                  className="rounded bg-[#8d59fe]/20 hover:bg-[#8d59fe]/30 transition-colors border border-[#8d59fe]/30 px-2 py-1 text-xs text-[#cfbcff] flex items-center gap-1 disabled:opacity-50"
+                >
+                  ↓ Download Patch .patch
+                </button>
+              )}
+            </div>
+          )}
 
           {activeTab === "risk" ? (
             <div className="mt-3 space-y-2 text-xs">
@@ -748,11 +748,7 @@ export default function Home() {
               )}
             </div>
           ) : null}
-          {exportedReport ? (
-            <pre className="mt-3 max-h-40 overflow-auto rounded bg-zinc-950 p-2 text-[11px] text-zinc-300">
-              {exportedReport}
-            </pre>
-          ) : null}
+
           {runEvidence ? (
             <div className="mt-3">
               <button
