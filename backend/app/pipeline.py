@@ -684,6 +684,8 @@ def run_analysis(
     req: AnalysisRequest,
     real_bench_ms: float | None = None,
     _stage3_runtime_source: str | None = None,
+    _repo_dir: str | None = None,
+    _repo_files: list[str] | None = None,
 ) -> AnalysisResult:
     """Run full CUDA→ROCm analysis pipeline.
 
@@ -692,21 +694,23 @@ def run_analysis(
     - Always compiles + executes SAXPY benchmark on the GPU via hipcc
     - Returns real GPU timing in BenchmarkResult
     """
-    random.seed(req.github_url)
+    import time as _time
+    run_id = f"A{int(_time.time() * 1000) % 100000}{random.randint(10, 99)}"
     risks: list[RiskItem] = []
     insights: list[Insight] = []
     diff_annotations: list[DiffAnnotation] = []
 
-    # Best-effort repo clone — never let git failure crash the whole request.
-    repo_dir: str | None = None
+    # Reuse pre-cloned repo from stage_events if provided, else clone fresh
+    repo_dir: str | None = _repo_dir
     repo_commit: str | None = None
-    try:
-        repo_dir, repo_commit = _prepare_repo(req.github_url)
-    except Exception:
-        repo_dir = None
-        repo_commit = None
+    if repo_dir is None:
+        try:
+            repo_dir, repo_commit = _prepare_repo(req.github_url)
+        except Exception:
+            repo_dir = None
+            repo_commit = None
 
-    repo_files: list[str] = []
+    repo_files: list[str] = _repo_files if _repo_files is not None else []
     source_graph_files: list[str] = []
     include_graph: dict[str, list[str]] = {}
     dependency_scan = {"cuda_headers": [], "cuda_calls_sample": []}
@@ -720,7 +724,7 @@ def run_analysis(
     runtime_exec_status = "not_run"
     runtime_exec_detail = "Runtime not executed."
     runtime_exec_ms: float | None = None
-    if repo_dir:
+    if repo_dir and not repo_files:
         repo_files = _collect_cuda_files(repo_dir)
         source_graph_files = _collect_source_graph_files(repo_dir)
         include_graph = _build_include_graph(source_graph_files)
@@ -860,7 +864,8 @@ def run_analysis(
     hipify_artifacts: list[dict] = []
     hipify_stats = {"files_changed": 0, "lines_added": 0, "lines_removed": 0, "tool": None}
     if repo_files:
-        hipify_artifacts, hipify_stats = _hipify_batch(repo_files, limit=3)
+        # Save zip (use ALL files, not limit=3)
+        hipify_artifacts, hipify_stats = _hipify_batch(repo_files, limit=len(repo_files))
         if hipify_artifacts:
             runtime_source = "repo-scan+hipify"
             try:
@@ -894,9 +899,15 @@ def run_analysis(
 
     # -- Save converted .zip immediately after hipify ---
     converted_zip_path: str | None = None
-    run_id = f"A{random.randint(1000, 9999)}"
     if hipify_artifacts:
         converted_zip_path = save_converted_zip(run_id, hipify_artifacts, repo_dir)
+
+    # Calculate real hipify_coverage_percent from stats
+    total_scanned = len(repo_files)
+    hipify_coverage = (
+        round(hipify_stats["files_changed"] / total_scanned * 100)
+        if total_scanned > 0 else 0
+    )
     # runtime_status: set to pass if Stage 3 GPU SAXPY ran, otherwise use build validation
     if _stage3_succeeded:
         runtime_status_value = "pass"
@@ -929,15 +940,16 @@ def run_analysis(
         decision_engine=_decision(risks),
         diff_annotations=diff_annotations,
         pull_request_preview=_pull_request_preview(
-            files_changed=hipify_stats["files_changed"] or 12,
-            lines_added=hipify_stats["lines_added"] or 340,
-            lines_removed=hipify_stats["lines_removed"] or 210,
+            files_changed=hipify_stats["files_changed"] or len(repo_files),
+            lines_added=hipify_stats["lines_added"] or 0,
+            lines_removed=hipify_stats["lines_removed"] or 0,
         ),
         runtime_source=runtime_source,
         build_system=build_system,
         build_status=build_status,
         repo_commit=repo_commit,
         runtime_status=runtime_status_value,
+        hipify_coverage_percent=hipify_coverage,
     )
 
     real_pr_url = None
@@ -1098,6 +1110,8 @@ def stage_events(req: AnalysisRequest):
         req,
         real_bench_ms=real_bench_ms,
         _stage3_runtime_source=stage3_runtime_source,
+        _repo_dir=repo_dir,
+        _repo_files=repo_files,
     )
     yield ("completed", result.model_dump(mode="json"))
 

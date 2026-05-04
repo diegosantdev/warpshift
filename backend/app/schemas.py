@@ -102,6 +102,6 @@ class AnalysisResult(BaseModel):
     build_status: Literal["not_run", "pass", "fail"] = "not_run"
     evidence_file: str | None = None
     repo_commit: str | None = None
-    hipify_coverage_percent: int = 65
+    hipify_coverage_percent: int = 0
     runtime_status: Literal["not_run", "pass", "fail"] = "not_run"
 
