@@ -72,7 +72,7 @@ def _prepare_repo(repo_url: str) -> tuple[str | None, str | None]:
                 _run(["git", "clone", "--depth", "1", repo_url, repo_dir])
         else:
             _run(["git", "fetch", "--depth", "1", "origin"], cwd=repo_dir)
-            _run(["git", "reset", "--hard", "origin/HEAD"], cwd=repo_dir)
+            _run(["git", "reset", "--hard", "FETCH_HEAD"], cwd=repo_dir)
         commit = _run(["git", "rev-parse", "HEAD"], cwd=repo_dir).stdout.strip()
         return repo_dir, commit
     except Exception as exc:
