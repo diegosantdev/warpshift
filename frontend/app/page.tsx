@@ -281,10 +281,16 @@ export default function Home() {
        } as any];
     }
     
-    return combined.slice(-6).map((item, i) => ({
+    let data = combined.slice(-6).map((item, i) => ({
       name: `R${i + 1}`,
       score: item.migration_score,
     }));
+    
+    if (data.length === 1) {
+      data = [{ name: 'Start', score: 0 }, data[0]];
+    }
+    
+    return data;
   }, [history, result]);
 
   const runMigration = () => {
@@ -629,7 +635,7 @@ export default function Home() {
               href={`http://134.199.200.190:8000/runs/${result.run_id}/download`}
               target="_blank"
               rel="noreferrer"
-              className="mt-3 flex items-center justify-center gap-2 rounded-lg bg-[#8d59fe] hover:bg-[#7a48ef] transition-colors px-4 py-2.5 text-sm font-bold text-white shadow-[0_0_20px_rgba(141,89,254,0.4)] hover:shadow-[0_0_30px_rgba(141,89,254,0.6)]"
+              className="mt-3 flex items-center justify-center gap-2 rounded-lg bg-[#8d59fe] hover:bg-[#7a48ef] transition-colors px-4 py-2.5 text-sm font-bold text-white"
             >
               ↓ Download Converted Code (.zip)
             </a>
