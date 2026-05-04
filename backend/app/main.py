@@ -149,6 +149,20 @@ def git_pull():
         raise HTTPException(500, f"git pull failed: {exc}")
 
 
+# ── Admin: History ────────────────────────────────────────────────────────────
+
+@app.delete("/admin/clear-history")
+def clear_history():
+    """Wipe the run history so the delta chart starts fresh."""
+    from .pipeline import HISTORY_FILE
+    try:
+        if os.path.exists(HISTORY_FILE):
+            os.remove(HISTORY_FILE)
+        return {"status": "cleared"}
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to clear history: {exc}")
+
+
 # ── Core API ──────────────────────────────────────────────────────────────────
 
 @app.post("/analyze")
