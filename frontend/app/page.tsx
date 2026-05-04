@@ -498,7 +498,7 @@ export default function Home() {
               disabled={running}
               className="inline-flex items-center gap-1 rounded bg-[#8d59fe] px-3 py-1 font-semibold text-white disabled:opacity-50 transition-all whitespace-nowrap"
             >
-              {running ? "AGENT ANALYZING..." : "MIGRATE"}
+              {running ? "ANALYZING..." : "MIGRATE"}
               {!running ? <ArrowRightIcon /> : null}
             </button>
           </div>
@@ -507,7 +507,7 @@ export default function Home() {
               <div key={stage.stage} className="glass-card rounded p-3 flex flex-col">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="font-medium text-zinc-200 flex items-center gap-2">
+                    <p className="font-medium text-zinc-200 flex flex-wrap items-center gap-2">
                       Stage {stage.stage}: {stage.name}
                       {stage.status === "done" && stage.duration_s !== undefined && (
                         <span className="text-[10px] font-mono text-zinc-500 font-normal">
@@ -531,7 +531,12 @@ export default function Home() {
                   </div>
                   <div className="flex items-center justify-center">
                     {stage.status === "idle" && <div className="h-2 w-2 rounded-full bg-zinc-600"></div>}
-                    {stage.status === "running" && <div className="h-3 w-3 rounded-full bg-[#8d59fe] animate-pulse-ring"></div>}
+                    {stage.status === "running" && (
+                      <svg className="animate-spin h-4 w-4 text-[#8d59fe]" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                    )}
                     {stage.status === "done" && <CheckIcon className="h-4 w-4 text-emerald-400" />}
                     {stage.status === "failed" && <div className="h-4 w-4 text-red-500 font-bold flex items-center justify-center">×</div>}
                   </div>
@@ -543,7 +548,7 @@ export default function Home() {
                       {stage.detail}
                     </div>}
                     {stage.log?.stdout && (
-                      <div className="opacity-70 whitespace-pre-wrap break-all leading-relaxed pl-3 border-l border-zinc-800">
+                      <div className="opacity-70 whitespace-pre-wrap break-all overflow-x-auto leading-relaxed pl-3 border-l border-zinc-800">
                         {stage.log.stdout.trim().split('\n').filter(Boolean).slice(-3).join('\n')}
                       </div>
                     )}
