@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import importlib
+import zipfile as _zipfile
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +17,7 @@ from .pipeline import (
     get_history,
     RUNS_DIR,
     run_analysis,
+    save_converted_zip,
     stage_events,
     create_pr_for_run,
 )
@@ -194,6 +196,29 @@ def create_pr_endpoint(run_id: str):
             detail="Failed to create PR. Ensure GitHub CLI is authenticated and repo exists.",
         )
     return {"status": "ok", "pr_url": url}
+
+
+@app.get("/runs/{run_id}/download")
+def download_converted(run_id: str):
+    """Stream the converted HIP/ROCm zip for a given run."""
+    from fastapi.responses import FileResponse
+    zip_path = os.path.join(RUNS_DIR, f"{run_id}_converted.zip")
+    if not os.path.exists(zip_path):
+        # Try to rebuild from evidence
+        evidence_path = os.path.join(RUNS_DIR, f"{run_id}.json")
+        if not os.path.exists(evidence_path):
+            raise HTTPException(status_code=404, detail="No converted code found for this run. Run migration first.")
+        with open(evidence_path, "r", encoding="utf-8") as fp:
+            evidence = json.load(fp)
+        if evidence.get("converted_zip"):
+            zip_path = evidence["converted_zip"]
+        if not os.path.exists(zip_path):
+            raise HTTPException(status_code=404, detail="Converted code not yet available. Run in 'full' mode with a valid CUDA repo.")
+    return FileResponse(
+        path=zip_path,
+        media_type="application/zip",
+        filename=f"warpshift-{run_id}-hip-converted.zip",
+    )
 
 
 @app.get("/demo-repos")

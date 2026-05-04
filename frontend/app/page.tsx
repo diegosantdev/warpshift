@@ -147,7 +147,7 @@ type AnalysisResult = {
     github_pr_body: string;
     real_pr_url?: string | null;
   };
-  runtime_source: "mock" | "repo-scan" | "repo-scan+hipify";
+  runtime_source: string;
   hipify_coverage_percent: number;
   runtime_status: "pass" | "fail";
   build_system?: string | null;
@@ -578,12 +578,12 @@ export default function Home() {
             <div className={`mt-2 rounded-lg p-3 font-semibold text-center border shadow-lg ${
               result.decision_engine.decision === "do_not_migrate_yet"
                 ? "bg-red-500/10 border-red-500/30 text-red-400"
-                : "bg-amber-500/10 border-amber-500/30 text-amber-400"
+                : "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
             }`}>
               {result.decision_engine.decision === "do_not_migrate_yet" ? (
                 <span className="flex items-center justify-center gap-1.5"><XIcon className="h-4 w-4" /> DO NOT MIGRATE YET</span>
               ) : (
-                <span className="flex items-center justify-center gap-1.5"><AlertIcon className="h-4 w-4" /> PROCEED WITH CAUTION</span>
+                <span className="flex items-center justify-center gap-1.5"><CheckIcon className="h-4 w-4" /> PROCEED WITH MIGRATION</span>
               )}
             </div>
           ) : (
@@ -606,14 +606,14 @@ export default function Home() {
           ) : null}
           {result ? (
             <p className="mt-1 text-xs text-zinc-500">
-              Source: {result.runtime_source} | Commit:{" "}
+              Source: <span className={result.runtime_source.includes("gpu") ? "text-emerald-400 font-semibold" : "text-zinc-400"}>{result.runtime_source}</span> | Commit:{" "}
               {(result.repo_commit || "n/a").slice(0, 12)}
             </p>
           ) : null}
           {result ? (
             <p className="mt-1 text-xs text-zinc-500">
               HIPIFY coverage: {result.hipify_coverage_percent}% | Runtime:{" "}
-              {result.runtime_status.toUpperCase()}
+              <span className={result.runtime_status === "pass" ? "text-emerald-400 font-semibold" : "text-zinc-400"}>{result.runtime_status.toUpperCase()}</span>
             </p>
           ) : null}
           {result ? (
@@ -622,6 +622,18 @@ export default function Home() {
               {result.build_status.toUpperCase()}
             </p>
           ) : null}
+
+          {/* ── Download Converted Code ── */}
+          {result && (
+            <a
+              href={`http://134.199.200.190:8000/runs/${result.run_id}/download`}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-3 flex items-center justify-center gap-2 rounded-lg bg-[#8d59fe] hover:bg-[#7a48ef] transition-colors px-4 py-2.5 text-sm font-bold text-white shadow-[0_0_20px_rgba(141,89,254,0.4)] hover:shadow-[0_0_30px_rgba(141,89,254,0.6)]"
+            >
+              ↓ Download Converted Code (.zip)
+            </a>
+          )}
 
           <div className="mt-3 flex gap-2">
             <button

@@ -344,16 +344,25 @@ def _hipify_batch(files: list[str], limit: int = 3) -> tuple[list[dict], dict]:
                     n=2,
                 )
             )
-            added = sum(1 for line in diff if line.startswith("+") and not line.startswith("+++"))
-            removed = sum(1 for line in diff if line.startswith("-") and not line.startswith("---"))
+            added = sum(1 for line in diff if line.startswith("+") and not line.startswith("++"))
+            removed = sum(1 for line in diff if line.startswith("-") and not line.startswith("--"))
             if added or removed:
                 stats["files_changed"] += 1
                 stats["lines_added"] += added
                 stats["lines_removed"] += removed
                 stats["tool"] = tool
+                # Write the converted file to disk as .hip
+                hip_path = file_path + ".hip"
+                try:
+                    with open(hip_path, "w", encoding="utf-8") as fp:
+                        fp.write(converted)
+                except Exception:
+                    hip_path = None
                 artifacts.append(
                     {
                         "file_path": file_path,
+                        "hip_path": hip_path,
+                        "converted_content": converted,
                         "diff_preview": "".join(diff[:120]),
                         "original_first": original[0].strip()[:180] if original else "",
                         "converted_first": conv_lines[0].strip()[:180] if conv_lines else "",
@@ -362,6 +371,35 @@ def _hipify_batch(files: list[str], limit: int = 3) -> tuple[list[dict], dict]:
         except Exception:
             continue
     return artifacts, stats
+
+
+def save_converted_zip(run_id: str, hipify_artifacts: list[dict], repo_dir: str | None) -> str | None:
+    """Zip all converted .hip files and save to RUNS_DIR/{run_id}_converted.zip. Returns path."""
+    import zipfile
+    zip_path = os.path.join(RUNS_DIR, f"{run_id}_converted.zip")
+    try:
+        os.makedirs(RUNS_DIR, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for artifact in hipify_artifacts:
+                content = artifact.get("converted_content", "")
+                if not content:
+                    continue
+                # Use relative path inside the zip
+                file_path = artifact["file_path"]
+                arcname = os.path.basename(file_path).replace(".cu", ".hip")
+                if repo_dir:
+                    try:
+                        arcname = os.path.relpath(file_path, repo_dir).replace(".cu", ".hip")
+                    except ValueError:
+                        pass
+                zf.writestr(arcname, content)
+            # Add a README
+            readme = f"WarpShift Migration Output\nRun: {run_id}\nConverted {len(hipify_artifacts)} file(s) from CUDA to HIP/ROCm.\n"
+            zf.writestr("WARPSHIFT_README.txt", readme)
+        return zip_path
+    except Exception:
+        return None
+
 
 
 def _apply_semantic_fixes(converted: str) -> tuple[str, list[str]]:
@@ -780,7 +818,11 @@ def run_analysis(
             except Exception:
                 pass
 
+    # -- Save converted .zip immediately after hipify ---
+    converted_zip_path: str | None = None
     run_id = f"A{random.randint(1000, 9999)}"
+    if hipify_artifacts:
+        converted_zip_path = save_converted_zip(run_id, hipify_artifacts, repo_dir)
     # runtime_status: set to pass if Stage 3 GPU SAXPY ran, otherwise use build validation
     if _stage3_succeeded:
         runtime_status_value = "pass"
@@ -869,7 +911,8 @@ def run_analysis(
         "build_detail": build_detail,
         "build_rewrite_previews": build_rewrite_previews,
         "hipify_stats": hipify_stats,
-        "hipify_artifacts": hipify_artifacts,
+        "hipify_artifacts": [{k: v for k, v in a.items() if k != "converted_content"} for a in hipify_artifacts],
+        "converted_zip": converted_zip_path,
         "runtime_execution": {
             "status": runtime_exec_status,
             "detail": runtime_exec_detail,
