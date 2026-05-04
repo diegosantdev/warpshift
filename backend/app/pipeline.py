@@ -77,6 +77,11 @@ def _prepare_repo(repo_url: str) -> tuple[str | None, str | None]:
         return repo_dir, commit
     except Exception as exc:
         print(f"[WARPSHIFT ERROR] _prepare_repo failed for {repo_url}: {exc}", flush=True)
+        try:
+            with open(os.path.join(DATA_DIR, "clone_error.txt"), "w") as fp:
+                fp.write(str(exc))
+        except Exception:
+            pass
         return None, None
 
 
