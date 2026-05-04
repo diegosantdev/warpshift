@@ -548,7 +548,7 @@ export default function Home() {
                       {stage.detail}
                     </div>}
                     {stage.log?.stdout && (
-                      <div className="opacity-70 whitespace-pre-wrap break-all overflow-x-auto leading-relaxed pl-3 border-l border-zinc-800">
+                      <div className="opacity-70 whitespace-pre-wrap break-words min-w-0 max-w-full leading-relaxed pl-3 border-l border-zinc-800 overflow-hidden">
                         {stage.log.stdout.trim().split('\n').filter(Boolean).slice(-3).join('\n')}
                       </div>
                     )}

@@ -75,8 +75,13 @@ def _prepare_repo(repo_url: str) -> tuple[str | None, str | None]:
                     _run(["git", "config", "core.sparseCheckout", "false"], cwd=repo_dir)
                 except Exception:
                     pass
-            _run(["git", "fetch", "--depth", "1", "origin"], cwd=repo_dir)
-            _run(["git", "reset", "--hard", "FETCH_HEAD"], cwd=repo_dir)
+            try:
+                _run(["git", "fetch", "--depth", "1", "origin"], cwd=repo_dir)
+                _run(["git", "reset", "--hard", "FETCH_HEAD"], cwd=repo_dir)
+            except Exception:
+                import shutil
+                shutil.rmtree(repo_dir, ignore_errors=True)
+                _run(["git", "clone", "--depth", "1", base_url, repo_dir])
         commit = _run(["git", "rev-parse", "HEAD"], cwd=repo_dir).stdout.strip()
         
         target_dir = os.path.join(repo_dir, subpath) if subpath else repo_dir
