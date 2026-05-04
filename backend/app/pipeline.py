@@ -302,21 +302,95 @@ def _cuda_to_hip_mapping_report(dep_scan: dict) -> dict:
     return {"header_mappings": mappings}
 
 
+_CUDA_TO_HIP = [
+    (r'#include\s*[<"]cuda_runtime\.h[>"]',    '#include <hip/hip_runtime.h>'),
+    (r'#include\s*[<"]cuda\.h[>"]',             '#include <hip/hip_runtime.h>'),
+    (r'#include\s*[<"]cuda_runtime_api\.h[>"]', '#include <hip/hip_runtime.h>'),
+    (r'#include\s*[<"]cublas_v2\.h[>"]',        '#include <rocblas/rocblas.h>'),
+    (r'#include\s*[<"]cublas\.h[>"]',           '#include <rocblas/rocblas.h>'),
+    (r'#include\s*[<"]cudnn\.h[>"]',            '#include <miopen/miopen.h>'),
+    (r'\bcudaStream_t\b',       'hipStream_t'),
+    (r'\bcudaEvent_t\b',        'hipEvent_t'),
+    (r'\bcudaError_t\b',        'hipError_t'),
+    (r'\bcudaDeviceProp\b',     'hipDeviceProp_t'),
+    (r'\bcudaMalloc\b',         'hipMalloc'),
+    (r'\bcudaMallocHost\b',     'hipHostMalloc'),
+    (r'\bcudaFree\b',           'hipFree'),
+    (r'\bcudaFreeHost\b',       'hipHostFree'),
+    (r'\bcudaMemcpy\b',         'hipMemcpy'),
+    (r'\bcudaMemcpyAsync\b',    'hipMemcpyAsync'),
+    (r'\bcudaMemset\b',         'hipMemset'),
+    (r'\bcudaMemcpyHostToDevice\b',   'hipMemcpyHostToDevice'),
+    (r'\bcudaMemcpyDeviceToHost\b',   'hipMemcpyDeviceToHost'),
+    (r'\bcudaMemcpyDeviceToDevice\b', 'hipMemcpyDeviceToDevice'),
+    (r'\bcudaSetDevice\b',           'hipSetDevice'),
+    (r'\bcudaGetDevice\b',           'hipGetDevice'),
+    (r'\bcudaGetDeviceCount\b',      'hipGetDeviceCount'),
+    (r'\bcudaDeviceSynchronize\b',   'hipDeviceSynchronize'),
+    (r'\bcudaDeviceReset\b',         'hipDeviceReset'),
+    (r'\bcudaGetDeviceProperties\b', 'hipGetDeviceProperties'),
+    (r'\bcudaEventCreate\b',        'hipEventCreate'),
+    (r'\bcudaEventDestroy\b',       'hipEventDestroy'),
+    (r'\bcudaEventRecord\b',        'hipEventRecord'),
+    (r'\bcudaEventSynchronize\b',   'hipEventSynchronize'),
+    (r'\bcudaEventElapsedTime\b',   'hipEventElapsedTime'),
+    (r'\bcudaSuccess\b',            'hipSuccess'),
+    (r'\bcudaGetLastError\b',       'hipGetLastError'),
+    (r'\bcudaGetErrorString\b',     'hipGetErrorString'),
+    (r'\bcudaStreamCreate\b',       'hipStreamCreate'),
+    (r'\bcudaStreamDestroy\b',      'hipStreamDestroy'),
+    (r'\bcudaStreamSynchronize\b',  'hipStreamSynchronize'),
+    (r'\bcudaThreadSynchronize\b',  'hipDeviceSynchronize'),
+    (r'\bcublasCreate\b',           'rocblas_create_handle'),
+    (r'\bcublasDestroy\b',          'rocblas_destroy_handle'),
+    (r'\bcublasSgemm\b',            'rocblas_sgemm'),
+    (r'\bcublasDgemm\b',            'rocblas_dgemm'),
+    (r'\bCUBLAS_OP_N\b',            'rocblas_operation_none'),
+    (r'\bCUBLAS_OP_T\b',            'rocblas_operation_transpose'),
+]
+
+
+def _python_hipify(source: str) -> str:
+    """Pure-Python CUDA→HIP regex converter — fallback when hipify-perl unavailable."""
+    result = source
+    for pattern, replacement in _CUDA_TO_HIP:
+        result = re.sub(pattern, replacement, result)
+    # Kernel launch <<<grid, block>>> -> hipLaunchKernelGGL(fn, grid, block, 0, 0, args)
+    result = re.sub(
+        r'(\w+)\s*<<<\s*([^,>]+),\s*([^>]+)>>>\s*\(([^)]*)\)',
+        r'hipLaunchKernelGGL(\1, dim3(\2), dim3(\3), 0, 0, \4)',
+        result,
+    )
+    return result
+
+
 def _hipify_one_file(file_path: str) -> tuple[str | None, str | None]:
+    # 1. Try system hipify-perl
     try:
         result = _run([settings.hipify_bin, file_path])
-        return result.stdout, settings.hipify_bin
+        if result.stdout:
+            return result.stdout, settings.hipify_bin
     except Exception:
-        local_hipify = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "tools", "HIPIFY", "bin", "hipify-perl")
-        )
-        if os.path.exists(local_hipify):
-            try:
-                result = _run(["perl", local_hipify, file_path])
+        pass
+    # 2. Try local bundled hipify-perl
+    local_hipify = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "tools", "HIPIFY", "bin", "hipify-perl")
+    )
+    if os.path.exists(local_hipify):
+        try:
+            result = _run(["perl", local_hipify, file_path])
+            if result.stdout:
                 return result.stdout, "perl hipify-perl(local)"
-            except Exception:
-                return None, None
+        except Exception:
+            pass
+    # 3. Python regex fallback — always produces output for any .cu file
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as fp:
+            source = fp.read()
+        return _python_hipify(source), "python-regex-hipify"
+    except Exception:
         return None, None
+
 
 
 def _hipify_batch(files: list[str], limit: int = 3) -> tuple[list[dict], dict]:
