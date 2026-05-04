@@ -746,7 +746,16 @@ def run_analysis(
     """
     random.seed(req.github_url)
     risks = _mock_risks()
-    repo_dir, repo_commit = _prepare_repo(req.github_url)
+
+    # Best-effort repo clone — never let git failure crash the whole request.
+    repo_dir: str | None = None
+    repo_commit: str | None = None
+    try:
+        repo_dir, repo_commit = _prepare_repo(req.github_url)
+    except Exception:
+        repo_dir = None
+        repo_commit = None
+
     repo_files: list[str] = []
     source_graph_files: list[str] = []
     include_graph: dict[str, list[str]] = {}
@@ -844,25 +853,28 @@ def run_analysis(
             risks = rebuilt
 
     # ── Stage 3: Real GPU SAXPY (always when backend_mode=real) ──────────────
-    # Runs regardless of repo clone success. This is what elevates
-    # runtime_source from "mock" to "hipcc+gpu" and gives real bench_ms.
+    # Runs regardless of repo clone success — this is what elevates
+    # runtime_source from 'mock' to 'hipcc+gpu' and provides real bench_ms.
     _stage3_log: dict = {}
     if settings.backend_mode == "real" and real_bench_ms is None:
-        from .stages import run_runtime_validation_stage as _run_s3
-        _s3 = _run_s3(req.mode)
-        if _s3.log and isinstance(_s3.log.toolchain, dict):
-            _stage3_log = _s3.log.toolchain
-            _gpu_ms = _stage3_log.get("bench_ms")
-            if _gpu_ms and float(_gpu_ms) > 0:
-                real_bench_ms = float(_gpu_ms)
-        # Upgrade runtime_source if Stage 3 succeeded
-        if _s3.status == "done" and real_bench_ms is not None:
-            if runtime_source == "mock":
-                runtime_source = "hipcc+gpu"
-            elif runtime_source == "repo-scan":
-                runtime_source = "repo-scan+gpu"
-            elif runtime_source == "repo-scan+hipify":
-                runtime_source = "repo-scan+hipify+gpu"
+        try:
+            from .stages import run_runtime_validation_stage as _run_s3
+            _s3 = _run_s3(req.mode)
+            if _s3.log and isinstance(_s3.log.toolchain, dict):
+                _stage3_log = _s3.log.toolchain
+                _gpu_ms = _stage3_log.get("bench_ms")
+                if _gpu_ms is not None and float(_gpu_ms) > 0:
+                    real_bench_ms = float(_gpu_ms)
+            # Upgrade runtime_source if Stage 3 succeeded
+            if _s3.status == "done" and real_bench_ms is not None:
+                if runtime_source == "mock":
+                    runtime_source = "hipcc+gpu"
+                elif runtime_source == "repo-scan":
+                    runtime_source = "repo-scan+gpu"
+                elif runtime_source == "repo-scan+hipify":
+                    runtime_source = "repo-scan+hipify+gpu"
+        except Exception:
+            pass  # Stage 3 failure never crashes /analyze
 
     # Accept override from stage_events() caller (SSE path)
     if _stage3_runtime_source:
