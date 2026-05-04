@@ -20,11 +20,10 @@ from .schemas import (
     RiskItem,
 )
 from .settings import settings
+from .gemini_agent import analyze_migration_and_fix, generate_pr_body
 from .stages import (
-    run_ai_explanation_stage,
     run_hipify_stage,
     run_runtime_validation_stage,
-    run_static_analysis_stage,
 )
 from .real_anchor import load_real_anchor
 
@@ -69,6 +68,13 @@ def _prepare_repo(repo_url: str) -> tuple[str | None, str | None]:
         if not os.path.exists(os.path.join(repo_dir, ".git")):
             _run(["git", "clone", "--depth", "1", base_url, repo_dir])
         else:
+            sparse_file = os.path.join(repo_dir, ".git", "info", "sparse-checkout")
+            if os.path.exists(sparse_file):
+                try:
+                    os.remove(sparse_file)
+                    _run(["git", "config", "core.sparseCheckout", "false"], cwd=repo_dir)
+                except Exception:
+                    pass
             _run(["git", "fetch", "--depth", "1", "origin"], cwd=repo_dir)
             _run(["git", "reset", "--hard", "FETCH_HEAD"], cwd=repo_dir)
         commit = _run(["git", "rev-parse", "HEAD"], cwd=repo_dir).stdout.strip()
@@ -564,16 +570,20 @@ def _pull_request_preview(
     files_changed: int = 12,
     lines_added: int = 340,
     lines_removed: int = 210,
+    risks: list[RiskItem] = None,
 ) -> PullRequestPreview:
-    pr_body = """## Summary
+    risks = risks or []
+    risk_lines = "\n".join(f"- {r.file}:{r.line} - {r.insight}" for r in risks[:5])
+    if not risk_lines:
+        risk_lines = "- No medium/high risks automatically detected."
+
+    pr_body = f"""## Summary
 - Convert CUDA APIs to HIP equivalents for ROCm compatibility.
 - Annotate medium/high-risk migration points directly in the diff.
 - Add runtime validation output and migration decision report.
 
-## Risk highlights
-- warpSize assumption can break on wavefront 64.
-- cuBLAS argument ordering differs in rocBLAS.
-- dynamic launch and cuDNN custom ops require manual review.
+## Detected Risks
+{risk_lines}
 
 ## Test plan
 - [ ] Build with hipcc on ROCm 7.x
@@ -698,6 +708,8 @@ def run_analysis(
     _stage3_runtime_source: str | None = None,
     _repo_dir: str | None = None,
     _repo_files: list[str] | None = None,
+    _gemini_fixes: list | None = None,
+    _gemini_pr_body: str | None = None,
 ) -> AnalysisResult:
     """Run full CUDA→ROCm analysis pipeline.
 
@@ -923,15 +935,13 @@ def run_analysis(
     # runtime_status: set to pass if Stage 3 GPU SAXPY ran, otherwise use build validation
     if _stage3_succeeded:
         runtime_status_value = "pass"
-    elif req.mode == "live":
-        runtime_status_value = "not_run"
     else:
         runtime_status_value = "not_run"
-    if build_status == "pass" and repo_dir:
-        bin_path = os.path.join(repo_dir, "warpshift_runtime_check.out")
-        runtime_exec_status, runtime_exec_detail, runtime_exec_ms = _run_runtime_execution(bin_path)
-        if runtime_exec_status in {"pass", "fail"}:
-            runtime_status_value = runtime_exec_status
+        if build_status == "pass" and repo_dir:
+            bin_path = os.path.join(repo_dir, "warpshift_runtime_check.out")
+            runtime_exec_status, runtime_exec_detail, runtime_exec_ms = _run_runtime_execution(bin_path)
+            if runtime_exec_status in {"pass", "fail"}:
+                runtime_status_value = runtime_exec_status
 
     confidence = _compute_confidence(
         build_status=build_status,
@@ -939,6 +949,54 @@ def run_analysis(
         runtime_source=runtime_source,
         hipify_stats=hipify_stats,
     )
+
+    if _gemini_fixes:
+        for fix in _gemini_fixes:
+            # Map LLM fixes to UI risks
+            r = RiskItem(
+                id=f"gemini_{random.randint(100, 999)}",
+                level=fix.get("level", "medium"),
+                title=fix.get("issue", "Contextual Fix Required"),
+                description=f"Agent detected patch required on line {fix.get('line_number', 1)}.",
+                file=os.path.basename(repo_files[0]) if repo_files else "source.cu",
+                line=fix.get("line_number", 1),
+                insight=f"Agent fix: Replace `{fix.get('original_line', '')}` with `{fix.get('fixed_line', '')}`",
+                detection_source="agent contextual analysis",
+                confidence="high",
+                effort="low",
+                fix=fix.get("fixed_line", "")
+            )
+            risks.append(r)
+            diff_annotations.append(DiffAnnotation(
+                id=f"ann-{r.id}",
+                file=r.file,
+                line=r.line,
+                original=fix.get("original_line", ""),
+                converted=fix.get("fixed_line", ""),
+                detection_source=r.detection_source,
+                confidence=r.confidence,
+                effort=r.effort,
+                insight=Insight(risk_id=r.id, summary=r.title, impact=[r.description], fix_applied=r.fix or "", manual_review="no")
+            ))
+
+    if _gemini_pr_body:
+        pull_request_preview = PullRequestPreview(
+            pr_number=random.randint(40, 99),
+            title="Agent Migration PR: CUDA to ROCm",
+            files_changed=hipify_stats["files_changed"] or len(repo_files),
+            lines_added=hipify_stats["lines_added"] or 0,
+            lines_removed=hipify_stats["lines_removed"] or 0,
+            github_pr_body=_gemini_pr_body,
+            flagged_for_review=[r.insight for r in risks if r.level in ("high", "medium")],
+            manual_fix_required=[]
+        )
+    else:
+        pull_request_preview = _pull_request_preview(
+            files_changed=hipify_stats["files_changed"] or len(repo_files),
+            lines_added=hipify_stats["lines_added"] or 0,
+            lines_removed=hipify_stats["lines_removed"] or 0,
+            risks=risks,
+        )
 
     result = AnalysisResult(
         run_id=run_id,
@@ -951,11 +1009,7 @@ def run_analysis(
         benchmark=benchmark,
         decision_engine=_decision(risks),
         diff_annotations=diff_annotations,
-        pull_request_preview=_pull_request_preview(
-            files_changed=hipify_stats["files_changed"] or len(repo_files),
-            lines_added=hipify_stats["lines_added"] or 0,
-            lines_removed=hipify_stats["lines_removed"] or 0,
-        ),
+        pull_request_preview=pull_request_preview,
         runtime_source=runtime_source,
         build_system=build_system,
         build_status=build_status,
@@ -1046,27 +1100,55 @@ def stage_events(req: AnalysisRequest):
 
     # ── Stage 1: HIPIFY ───────────────────────────────────────────────────────
     yield ("stage_start", {"stage": 1, "name": "HIPIFY Conversion"})
+    t1 = time.time()
     s1 = run_hipify_stage(req.github_url, cuda_file=first_cuda)
+    dur1 = time.time() - t1
     yield ("stage_update", {
         "stage": 1, "progress": 65,
         "status": s1.status, "detail": s1.detail,
+        "duration_s": dur1,
         "log": s1.log.to_dict() if s1.log else {},
     })
     time.sleep(settings.stage_delay_seconds)
 
-    # ── Stage 2: Static Analysis ──────────────────────────────────────────────
-    yield ("stage_start", {"stage": 2, "name": "Static Analysis"})
-    s2 = run_static_analysis_stage(cuda_files=repo_files if repo_files else None)
+    # ── Stage 2: Agent Contextual Analysis ──────────────────────────────────────────────
+    yield ("stage_start", {"stage": 2, "name": "Agent Contextual Analysis"})
+    t2 = time.time()
+    
+    diff_text = s1.log.stdout[-2000:] if (s1.log and s1.log.stdout) else ""
+    cuda_code = ""
+    if first_cuda:
+        try:
+            with open(first_cuda, "r", encoding="utf-8") as fp:
+                cuda_code = fp.read()
+        except: pass
+        
+    agent_result = analyze_migration_and_fix(diff_text, cuda_code)
+    _agent_fixes = agent_result.get("fixes", [])
+    _agent_reasoning = agent_result.get("reasoning", "Agent completed analysis.")
+    
+    dur2 = time.time() - t2
     yield ("stage_update", {
         "stage": 2, "progress": 100,
-        "status": s2.status, "detail": s2.detail,
-        "log": s2.log.to_dict() if s2.log else {},
+        "status": "done", "detail": f"Agent identified {len(_agent_fixes)} contextual issues.",
+        "duration_s": dur2,
+        "log": {"stdout": _agent_reasoning},
     })
     time.sleep(settings.stage_delay_seconds)
 
     # ── Stage 3: Runtime Validation (real GPU SAXPY) ──────────────────────────
     yield ("stage_start", {"stage": 3, "name": "Runtime Validation (GPU)"})
+    t3 = time.time()
     s3 = run_runtime_validation_stage(req.mode, first_cuda)
+    dur3 = time.time() - t3
+    
+    # Check if GPU timing was captured
+    gpu_ms = None
+    if s3.log and isinstance(s3.log.toolchain, dict):
+        _m = s3.log.toolchain.get("bench_ms")
+        if _m and float(_m) > 0:
+            gpu_ms = float(_m)
+            
     if s3.status == "failed":
         yield ("runtime_error", {
             "error": s3.detail,
@@ -1077,6 +1159,8 @@ def stage_events(req: AnalysisRequest):
         yield ("stage_update", {
             "stage": 3, "progress": 100,
             "status": s3.status, "detail": s3.detail,
+            "duration_s": dur3,
+            "gpu_ms": gpu_ms,
             "log": s3.log.to_dict() if s3.log else {},
         })
     time.sleep(settings.stage_delay_seconds)
@@ -1097,25 +1181,19 @@ def stage_events(req: AnalysisRequest):
             else:
                 stage3_runtime_source = "hipcc+gpu"
 
-    # ── Stage 4: AI Explanation ───────────────────────────────────────────────
-    yield ("stage_start", {"stage": 4, "name": "AI Explanation Layer"})
-    # Use real code from first hipify artifact if available
-    issue = "warpSize hardcoded as 32 breaks on AMD CDNA wavefront 64."
-    orig  = "int warpSize = 32;"
-    conv  = "int warpSize = hipWarpSize;"
-    if s1.log and s1.log.stdout:
-        issue = s1.log.stdout[:300]
-    s4 = run_ai_explanation_stage(
-        issue_description=issue,
-        original_code=orig,
-        converted_code=conv,
-        hipify_diff=f"- {orig}\n+ {conv}",
-        detection_source="static analysis",
-    )
+    # ── Stage 4: Agent Reasoning Layer ───────────────────────────────────────────────
+    yield ("stage_start", {"stage": 4, "name": "Agent Reasoning Layer"})
+    t4 = time.time()
+    
+    _pr_body = generate_pr_body(_agent_fixes, diff_text)
+    
+    dur4 = time.time() - t4
     yield ("stage_update", {
         "stage": 4, "progress": 100,
-        "status": s4.status, "detail": s4.detail,
-        "log": s4.log.to_dict() if s4.log else {},
+        "status": "done",
+        "detail": "Agent successfully generated Pull Request reasoning.",
+        "duration_s": dur4,
+        "log": {"stdout": _pr_body[:300] + "..."},
     })
 
     # ── Final result (run_analysis skips Stage 3 since we already ran it) ─────
@@ -1125,6 +1203,8 @@ def stage_events(req: AnalysisRequest):
         _stage3_runtime_source=stage3_runtime_source,
         _repo_dir=repo_dir,
         _repo_files=repo_files,
+        _gemini_fixes=_agent_fixes,
+        _gemini_pr_body=_pr_body,
     )
     yield ("completed", result.model_dump(mode="json"))
 

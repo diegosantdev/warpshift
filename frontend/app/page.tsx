@@ -431,7 +431,7 @@ export default function Home() {
               height={26}
               className="rounded"
             />
-            <h1 className="text-lg font-semibold">WarpShift — CUDA to ROCm Migration Agent</h1>
+            <h1 className="text-lg font-semibold">WarpShift AI Agent</h1>
           </div>
           <div className="flex items-center gap-3">
             <span className="rounded bg-emerald-500/20 border border-emerald-500/30 px-3 py-1.5 text-xs font-bold text-emerald-400 flex items-center gap-2 shadow-[0_0_10px_rgba(16,185,129,0.2)]">
@@ -496,9 +496,9 @@ export default function Home() {
             <button
               onClick={runMigration}
               disabled={running}
-              className="inline-flex items-center gap-1 rounded bg-[#8d59fe] px-3 py-1 font-semibold text-white disabled:opacity-50"
+              className="inline-flex items-center gap-1 rounded bg-[#8d59fe] px-3 py-1 font-semibold text-white disabled:opacity-50 transition-all"
             >
-              {running ? "RUNNING..." : "MIGRATE"}
+              {running ? "AGENT ANALYZING REPOSITORY..." : "MIGRATE"}
               {!running ? <ArrowRightIcon /> : null}
             </button>
           </div>
@@ -617,9 +617,9 @@ export default function Home() {
                 : "bg-emerald-500/10 border-emerald-500/30 text-emerald-400"
             }`}>
               {result.decision_engine.decision === "do_not_migrate_yet" ? (
-                <span className="flex items-center justify-center gap-1.5"><XIcon className="h-4 w-4" /> DO NOT MIGRATE YET</span>
+                <span className="flex items-center justify-center gap-1.5"><XIcon className="h-4 w-4" /> AGENT DECISION: DO NOT MIGRATE</span>
               ) : (
-                <span className="flex items-center justify-center gap-1.5"><CheckIcon className="h-4 w-4" /> PROCEED WITH MIGRATION</span>
+                <span className="flex items-center justify-center gap-1.5"><CheckIcon className="h-4 w-4" /> AGENT DECISION: PROCEED WITH MIGRATION</span>
               )}
             </div>
           ) : (
