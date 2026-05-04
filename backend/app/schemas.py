@@ -88,10 +88,20 @@ class AnalysisResult(BaseModel):
     decision_engine: DecisionEngineResult
     diff_annotations: list[DiffAnnotation]
     pull_request_preview: PullRequestPreview
-    runtime_source: Literal["mock", "repo-scan", "repo-scan+hipify"]
+    runtime_source: Literal[
+        "mock",
+        "repo-scan",
+        "repo-scan+hipify",
+        "hipcc+gpu",
+        "repo-scan+gpu",
+        "repo-scan+hipify+gpu",
+        "ssh+hipcc+gpu",
+        "ssh+hipify+hipcc+gpu",
+    ] = "mock"
     build_system: str | None = None
     build_status: Literal["not_run", "pass", "fail"] = "not_run"
     evidence_file: str | None = None
     repo_commit: str | None = None
     hipify_coverage_percent: int = 65
-    runtime_status: Literal["pass", "fail"] = "fail"
+    runtime_status: Literal["not_run", "pass", "fail"] = "not_run"
+

@@ -409,8 +409,13 @@ def _run_runtime_execution(binary_path: str) -> tuple[str, str, float | None]:
 
 def _compute_confidence(build_status: str, runtime_status: str, runtime_source: str, hipify_stats: dict) -> int:
     value = 55
+    # Repo scan (static analysis) adds confidence
     if runtime_source in {"repo-scan", "repo-scan+hipify"}:
         value += 15
+    # Real GPU execution adds even more confidence
+    if "gpu" in runtime_source:
+        value += 20
+
     if hipify_stats.get("files_changed", 0) > 0:
         value += 10
     if build_status == "pass":
