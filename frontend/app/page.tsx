@@ -249,9 +249,10 @@ export default function Home() {
 
   const riskCounts = useMemo(() => {
     const items = result?.risk_items ?? [];
+    const flaggedCount = result?.pull_request_preview?.flagged_for_review?.length || 0;
     return {
       high: items.filter((r) => r.level === "high").length,
-      medium: items.filter((r) => r.level === "medium").length,
+      medium: items.filter((r) => r.level === "medium").length + flaggedCount,
       low: items.filter((r) => r.level === "low").length,
     };
   }, [result]);
@@ -324,10 +325,10 @@ export default function Home() {
     });
 
     stream.addEventListener("stage_update", (evt) => {
-      const payload = JSON.parse((evt as MessageEvent).data) as { stage: number };
+      const payload = JSON.parse((evt as MessageEvent).data) as { stage: number, status?: string, duration_s?: number, gpu_ms?: number };
       setStages((prev) =>
         prev.map((s) =>
-          s.stage === payload.stage ? { ...s, status: "done" } : s,
+          s.stage === payload.stage ? { ...s, status: (payload.status as any) || "done", duration_s: payload.duration_s, gpu_ms: payload.gpu_ms } : s,
         ),
       );
     });
