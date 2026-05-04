@@ -540,7 +540,7 @@ export default function Home() {
                 {stage.status !== "idle" && (stage.detail || stage.log?.stdout) && (
                   <div className="mt-3 bg-zinc-950/80 rounded p-2 text-[10px] font-mono text-zinc-400 border border-zinc-800/50 shadow-inner">
                     {stage.detail && <div className="text-[#cfbcff] mb-1 flex items-start gap-1">
-                      <span className="text-zinc-500">▶</span> {stage.detail}
+                      {stage.detail}
                     </div>}
                     {stage.log?.stdout && (
                       <div className="opacity-70 whitespace-pre-wrap break-words leading-relaxed pl-3 border-l border-zinc-800">
@@ -799,19 +799,6 @@ export default function Home() {
                   <pre className="mt-2 rounded bg-zinc-950/80 p-3 text-[11px] whitespace-pre-wrap break-words border border-zinc-800/50 text-zinc-300 leading-relaxed">
                     {result.pull_request_preview.github_pr_body}
                   </pre>
-                  {result.pull_request_preview.real_pr_url ? (
-                    <a href={result.pull_request_preview.real_pr_url} target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-1 text-xs text-[#cfbcff] hover:underline">
-                      View Real PR on GitHub <ArrowRightIcon className="h-3 w-3" />
-                    </a>
-                  ) : (
-                    <button
-                      onClick={publishRealPR}
-                      disabled={publishingPR}
-                      className="mt-3 rounded bg-[#8d59fe] px-3 py-1 text-xs font-semibold text-white disabled:opacity-50"
-                    >
-                      {publishingPR ? "Publishing..." : "Publish Real PR to GitHub"}
-                    </button>
-                  )}
                 </>
               ) : (
                 <div className="p-4 text-center text-zinc-500">
