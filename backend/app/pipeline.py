@@ -1098,7 +1098,7 @@ def stage_events(req: AnalysisRequest):
     first_cuda = repo_files[0] if repo_files else None
 
     # ── Stage 1: HIPIFY ───────────────────────────────────────────────────────
-    yield ("stage_start", {"stage": 1, "name": "HIPIFY Conversion"})
+    yield ("stage_start", {"stage": 1, "name": "HIPIFY"})
     t1 = time.time()
     s1 = run_hipify_stage(req.github_url, cuda_file=first_cuda)
     dur1 = time.time() - t1
@@ -1111,7 +1111,7 @@ def stage_events(req: AnalysisRequest):
     time.sleep(settings.stage_delay_seconds)
 
     # ── Stage 2: Agent Contextual Analysis ──────────────────────────────────────────────
-    yield ("stage_start", {"stage": 2, "name": "Agent Contextual Analysis"})
+    yield ("stage_start", {"stage": 2, "name": "Agent Analysis"})
     t2 = time.time()
     
     diff_text = s1.log.stdout[-2000:] if (s1.log and hasattr(s1.log, "stdout") and s1.log.stdout) else ""
@@ -1151,7 +1151,7 @@ def stage_events(req: AnalysisRequest):
     time.sleep(settings.stage_delay_seconds)
 
     # ── Stage 3: Runtime Validation (real GPU SAXPY) ──────────────────────────
-    yield ("stage_start", {"stage": 3, "name": "Runtime Validation (GPU)"})
+    yield ("stage_start", {"stage": 3, "name": "GPU Validation"})
     t3 = time.time()
     s3 = run_runtime_validation_stage(req.mode, first_cuda)
     dur3 = time.time() - t3
@@ -1196,7 +1196,7 @@ def stage_events(req: AnalysisRequest):
                 stage3_runtime_source = "hipcc+gpu"
 
     # ── Stage 4: Agent Reasoning Layer ───────────────────────────────────────────────
-    yield ("stage_start", {"stage": 4, "name": "Agent Reasoning Layer"})
+    yield ("stage_start", {"stage": 4, "name": "PR Generation"})
     t4 = time.time()
     
     _pr_body = generate_pr_body(_agent_fixes, diff_text)
