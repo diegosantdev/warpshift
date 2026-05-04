@@ -284,9 +284,9 @@ export default function Home() {
 
   const previousScore = useMemo(() => {
     if (!result) return null;
-    const priorRuns = history.filter(h => h.run_id !== result.run_id); // In a real app we'd filter by URL too
+    const priorRuns = history.filter(h => h.run_id !== result.run_id);
     if (priorRuns.length > 0) return priorRuns[0].migration_score;
-    return 78; // fallback for demo
+    return null;
   }, [result, history]);
 
   const deltaChartData = useMemo(() => {
