@@ -85,6 +85,8 @@ type Stage = {
   stage: number;
   name: string;
   status: "idle" | "running" | "done" | "failed";
+  duration_s?: number;
+  gpu_ms?: number;
 };
 
 type RiskItem = {
@@ -502,8 +504,19 @@ export default function Home() {
             {stages.map((stage) => (
               <div key={stage.stage} className="glass-card rounded p-3 flex items-center justify-between">
                 <div>
-                  <p className="font-medium text-zinc-200">
+                  <p className="font-medium text-zinc-200 flex items-center gap-2">
                     Stage {stage.stage}: {stage.name}
+                    {stage.status === "done" && stage.duration_s !== undefined && (
+                      <span className="text-[10px] font-mono text-zinc-500 font-normal">
+                        ({stage.duration_s < 0.1 ? "<0.1" : stage.duration_s.toFixed(1)}s)
+                      </span>
+                    )}
+                    {stage.status === "done" && stage.gpu_ms !== undefined && (
+                      <span className="text-[10px] font-mono text-emerald-500 font-bold bg-emerald-500/10 px-1.5 py-0.5 rounded flex items-center gap-1">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+                        {stage.gpu_ms}ms ← MI300X
+                      </span>
+                    )}
                   </p>
                   <p className={`text-xs mt-1 font-semibold uppercase tracking-wider ${
                     stage.status === "running" ? "text-[#cfbcff]" :
@@ -526,10 +539,10 @@ export default function Home() {
           <div className="mt-3 space-y-2">
             {(result?.diff_annotations ?? []).map((annotation) => (
               <div key={annotation.id} className="glass-card rounded p-3">
-                <p className="text-[11px] font-mono text-zinc-400 mb-2 font-medium break-all">
+                <p className="text-xs font-mono text-zinc-400 mb-2 font-medium break-all">
                   {annotation.file}:{annotation.line}
                 </p>
-                <div className="rounded bg-zinc-950/80 p-2 text-[11px] font-mono overflow-x-auto border border-zinc-800/50">
+                <div className="rounded bg-zinc-950/80 p-2 text-[13px] font-mono overflow-x-auto border border-zinc-800/50">
                   <div className="diff-line diff-remove">- {annotation.original}</div>
                   <div className="diff-line diff-add">+ {annotation.converted}</div>
                 </div>
@@ -741,7 +754,22 @@ export default function Home() {
                       <span className="text-red-400">-{result.pull_request_preview.lines_removed}</span>
                     </p>
                   </div>
-                  <p className="mt-2 text-zinc-300 font-medium">GitHub PR body:</p>
+                  
+                  {result.pull_request_preview.flagged_for_review?.length > 0 && (
+                    <div className="mt-4 rounded bg-red-500/10 border border-red-500/20 p-3">
+                      <h3 className="text-xs font-bold text-red-400 mb-2 uppercase tracking-wide flex items-center gap-2">
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                        Flagged For Review
+                      </h3>
+                      <ul className="list-disc list-inside text-xs text-red-300/80 space-y-1">
+                        {result.pull_request_preview.flagged_for_review.map((flag, idx) => (
+                          <li key={idx} className="font-mono">{flag}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  <p className="mt-4 text-zinc-300 font-medium">GitHub PR body:</p>
                   <pre className="mt-2 rounded bg-zinc-950/80 p-3 text-[11px] whitespace-pre-wrap break-words border border-zinc-800/50 text-zinc-300 leading-relaxed">
                     {result.pull_request_preview.github_pr_body}
                   </pre>
