@@ -732,7 +732,18 @@ def _decision(risks: list[RiskItem]) -> DecisionEngineResult:
     )
 
 
-def run_analysis(req: AnalysisRequest, real_bench_ms: float | None = None) -> AnalysisResult:
+def run_analysis(
+    req: AnalysisRequest,
+    real_bench_ms: float | None = None,
+    _stage3_runtime_source: str | None = None,
+) -> AnalysisResult:
+    """Run full CUDA→ROCm analysis pipeline.
+
+    When backend_mode=real:
+    - Clones repo for static analysis (best-effort, non-blocking)
+    - Always compiles + executes SAXPY benchmark on the GPU via hipcc
+    - Returns real GPU timing in BenchmarkResult
+    """
     random.seed(req.github_url)
     risks = _mock_risks()
     repo_dir, repo_commit = _prepare_repo(req.github_url)
@@ -831,6 +842,31 @@ def run_analysis(req: AnalysisRequest, real_bench_ms: float | None = None) -> An
             )
         if rebuilt:
             risks = rebuilt
+
+    # ── Stage 3: Real GPU SAXPY (always when backend_mode=real) ──────────────
+    # Runs regardless of repo clone success. This is what elevates
+    # runtime_source from "mock" to "hipcc+gpu" and gives real bench_ms.
+    _stage3_log: dict = {}
+    if settings.backend_mode == "real" and real_bench_ms is None:
+        from .stages import run_runtime_validation_stage as _run_s3
+        _s3 = _run_s3(req.mode)
+        if _s3.log and isinstance(_s3.log.toolchain, dict):
+            _stage3_log = _s3.log.toolchain
+            _gpu_ms = _stage3_log.get("bench_ms")
+            if _gpu_ms and float(_gpu_ms) > 0:
+                real_bench_ms = float(_gpu_ms)
+        # Upgrade runtime_source if Stage 3 succeeded
+        if _s3.status == "done" and real_bench_ms is not None:
+            if runtime_source == "mock":
+                runtime_source = "hipcc+gpu"
+            elif runtime_source == "repo-scan":
+                runtime_source = "repo-scan+gpu"
+            elif runtime_source == "repo-scan+hipify":
+                runtime_source = "repo-scan+hipify+gpu"
+
+    # Accept override from stage_events() caller (SSE path)
+    if _stage3_runtime_source:
+        runtime_source = _stage3_runtime_source
 
     anchor = load_real_anchor()
     if anchor and anchor.get("warp_detection", {}).get("found"):
@@ -997,50 +1033,100 @@ def run_analysis(req: AnalysisRequest, real_bench_ms: float | None = None) -> An
 
 
 def stage_events(req: AnalysisRequest):
-    repo_dir, _ = _prepare_repo(req.github_url)
+    """SSE generator: runs all 4 stages and emits events for each.
+
+    Stage 3 compiles + executes SAXPY on the GPU (real hipcc when backend_mode=real).
+    The real bench_ms and runtime_source are forwarded to run_analysis().
+    """
+    # Best-effort repo clone (non-blocking — don't let git failure kill the stream)
+    repo_dir: str | None = None
+    try:
+        repo_dir, _ = _prepare_repo(req.github_url)
+    except Exception:
+        pass
     repo_files = _collect_cuda_files(repo_dir, limit=6) if repo_dir else []
     first_cuda = repo_files[0] if repo_files else None
 
+    # ── Stage 1: HIPIFY ───────────────────────────────────────────────────────
     yield ("stage_start", {"stage": 1, "name": "HIPIFY Conversion"})
     s1 = run_hipify_stage(req.github_url, cuda_file=first_cuda)
-    yield ("stage_update", {"stage": 1, "progress": 65, "status": s1.status, "detail": s1.detail})
+    yield ("stage_update", {
+        "stage": 1, "progress": 65,
+        "status": s1.status, "detail": s1.detail,
+        "log": s1.log.to_dict() if s1.log else {},
+    })
     time.sleep(settings.stage_delay_seconds)
 
+    # ── Stage 2: Static Analysis ──────────────────────────────────────────────
     yield ("stage_start", {"stage": 2, "name": "Static Analysis"})
     s2 = run_static_analysis_stage(cuda_files=repo_files if repo_files else None)
-    yield ("stage_update", {"stage": 2, "progress": 100, "status": s2.status, "detail": s2.detail})
+    yield ("stage_update", {
+        "stage": 2, "progress": 100,
+        "status": s2.status, "detail": s2.detail,
+        "log": s2.log.to_dict() if s2.log else {},
+    })
     time.sleep(settings.stage_delay_seconds)
 
-    yield ("stage_start", {"stage": 3, "name": "Runtime Validation"})
+    # ── Stage 3: Runtime Validation (real GPU SAXPY) ──────────────────────────
+    yield ("stage_start", {"stage": 3, "name": "Runtime Validation (GPU)"})
     s3 = run_runtime_validation_stage(req.mode, first_cuda)
     if s3.status == "failed":
-        yield (
-            "runtime_error",
-            {
-                "error": s3.detail,
-                "detection_source": "runtime validation",
-            },
-        )
+        yield ("runtime_error", {
+            "error": s3.detail,
+            "detection_source": "runtime validation",
+            "log": s3.log.to_dict() if s3.log else {},
+        })
     else:
-        yield ("stage_update", {"stage": 3, "progress": 100, "status": s3.status, "detail": s3.detail})
+        yield ("stage_update", {
+            "stage": 3, "progress": 100,
+            "status": s3.status, "detail": s3.detail,
+            "log": s3.log.to_dict() if s3.log else {},
+        })
     time.sleep(settings.stage_delay_seconds)
 
-    # Extract real GPU timing from stage 3 log for use in run_analysis benchmark
+    # Extract real GPU timing + determine what runtime_source to report
     real_bench_ms: float | None = None
+    stage3_runtime_source: str | None = None
     if s3.log and isinstance(s3.log.toolchain, dict):
-        real_bench_ms = s3.log.toolchain.get("bench_ms")
+        _ms = s3.log.toolchain.get("bench_ms")
+        if _ms and float(_ms) > 0:
+            real_bench_ms = float(_ms)
+        if s3.status == "done" and real_bench_ms is not None:
+            # Determine best runtime_source label based on what ran
+            if repo_files and s1.log and s1.log.toolchain.get("converted_lines", 0):
+                stage3_runtime_source = "repo-scan+hipify+gpu"
+            elif repo_files:
+                stage3_runtime_source = "repo-scan+gpu"
+            else:
+                stage3_runtime_source = "hipcc+gpu"
 
+    # ── Stage 4: AI Explanation ───────────────────────────────────────────────
     yield ("stage_start", {"stage": 4, "name": "AI Explanation Layer"})
+    # Use real code from first hipify artifact if available
+    issue = "warpSize hardcoded as 32 breaks on AMD CDNA wavefront 64."
+    orig  = "int warpSize = 32;"
+    conv  = "int warpSize = hipWarpSize;"
+    if s1.log and s1.log.stdout:
+        issue = s1.log.stdout[:300]
     s4 = run_ai_explanation_stage(
-        issue_description="warpSize hardcoded as 32 breaks on AMD wavefront 64.",
-        original_code="int warpSize = 32;",
-        converted_code="int warpSize = hipWarpSize;",
-        hipify_diff="- int warpSize = 32;\n+ int warpSize = hipWarpSize;",
-        detection_source="static analysis"
+        issue_description=issue,
+        original_code=orig,
+        converted_code=conv,
+        hipify_diff=f"- {orig}\n+ {conv}",
+        detection_source="static analysis",
     )
-    yield ("stage_update", {"stage": 4, "progress": 100, "status": s4.status, "detail": s4.detail})
+    yield ("stage_update", {
+        "stage": 4, "progress": 100,
+        "status": s4.status, "detail": s4.detail,
+        "log": s4.log.to_dict() if s4.log else {},
+    })
 
-    result = run_analysis(req, real_bench_ms=real_bench_ms)
+    # ── Final result (run_analysis skips Stage 3 since we already ran it) ─────
+    result = run_analysis(
+        req,
+        real_bench_ms=real_bench_ms,
+        _stage3_runtime_source=stage3_runtime_source,
+    )
     yield ("completed", result.model_dump(mode="json"))
 
 

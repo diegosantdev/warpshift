@@ -11,6 +11,8 @@ import {
   Tooltip,
   XAxis,
   YAxis,
+  AreaChart,
+  Area,
 } from "recharts";
 
 function ChevronRightIcon({ className = "h-3 w-3" }: { className?: string }) {
@@ -67,6 +69,14 @@ function AlertIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
       <path d="M10 3L17 16H3L10 3Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
       <path d="M10 7.5V11" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
       <circle cx="10" cy="13.5" r="0.9" fill="currentColor" />
+    </svg>
+  );
+}
+
+function XIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" className={className} aria-hidden="true">
+      <path d="M5 5L15 15M15 5L5 15" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -279,6 +289,25 @@ export default function Home() {
     return 78; // fallback for demo
   }, [result, history]);
 
+  const deltaChartData = useMemo(() => {
+    const sorted = [...history].sort((a, b) => new Date(a.timestamp_utc).getTime() - new Date(b.timestamp_utc).getTime());
+    const hasCurrent = result ? sorted.some(h => h.run_id === result.run_id) : true;
+    
+    let combined = sorted;
+    if (result && !hasCurrent) {
+       combined = [...sorted, {
+          run_id: result.run_id,
+          timestamp_utc: result.timestamp_utc,
+          migration_score: result.migration_score
+       } as any];
+    }
+    
+    return combined.slice(-6).map((item, i) => ({
+      name: `R${i + 1}`,
+      score: item.migration_score,
+    }));
+  }, [history, result]);
+
   const runMigration = () => {
     setRunning(true);
     setRuntimeError(null);
@@ -349,23 +378,29 @@ export default function Home() {
   };
 
   const exportRiskReport = async (format: "json" | "markdown") => {
-    const response = await fetch(
-      `http://localhost:8000/export/risk-report?format=${format}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          github_url: githubUrl || demoRepos[0] || "https://github.com/NVIDIA/cuda-samples",
-          mode,
-        }),
-      },
-    );
-    const payload = (await response.json()) as { content: unknown };
-    setExportedReport(
-      typeof payload.content === "string"
-        ? payload.content
-        : JSON.stringify(payload.content, null, 2),
-    );
+    if (!result) {
+      setExportedReport("Error: No migration result available to export. Please run the migration first.");
+      return;
+    }
+    if (format === "markdown") {
+      const lines = [
+        "# Pre-Migration Risk Report",
+        `- Run: ${result.run_id}`,
+        `- Score: ${result.migration_score}/100`,
+        `- Confidence: ${result.migration_confidence}%`,
+        "",
+        "## Risks",
+      ];
+      for (const risk of result.risk_items || []) {
+        lines.push(`- [${risk.level.toUpperCase()}] ${risk.title} (source: ${risk.detection_source}, line: ${risk.line || "N/A"})`);
+      }
+      lines.push("");
+      lines.push("## Decision");
+      lines.push(`- ${result.decision_engine?.decision || "N/A"}`);
+      setExportedReport(lines.join("\n"));
+    } else {
+      setExportedReport(JSON.stringify(result, null, 2));
+    }
   };
 
   return (
@@ -407,7 +442,7 @@ export default function Home() {
       </div>
 
       <section className="grid grid-cols-1 gap-4 xl:grid-cols-4">
-        <article className="glass-panel rounded-xl p-4 relative">
+        <article className="glass-panel rounded-xl p-4 relative overflow-hidden">
           <h2 className="mb-3 text-xs font-semibold tracking-wide text-zinc-400">
             RECENT ANALYSES
           </h2>
@@ -426,24 +461,12 @@ export default function Home() {
             {history.length === 0 ? (
               <div className="rounded border border-zinc-800 bg-zinc-900/50 p-2 text-xs text-zinc-500">
                 No real runs yet. Execute MIGRATE to populate history.
-                <div className="mt-2">
-                  <Image
-                    src="/warpshift.png"
-                    alt="WarpShift mark"
-                    width={20}
-                    height={20}
-                    className="opacity-80"
-                  />
-                </div>
               </div>
             ) : null}
-            <button className="w-full rounded border border-dashed border-zinc-700 p-2 text-left text-zinc-400">
-              + new analysis
-            </button>
           </div>
         </article>
 
-        <article className="glass-panel rounded-xl p-4 relative">
+        <article className="glass-panel rounded-xl p-4 relative overflow-hidden">
           <h2 className="mb-3 text-xs font-semibold tracking-wide text-zinc-400">
             PIPELINE
           </h2>
@@ -553,7 +576,7 @@ export default function Home() {
           </div>
         </article>
 
-        <article className="glass-panel rounded-xl p-4 relative">
+        <article className="glass-panel rounded-xl p-4 relative overflow-hidden">
           <h2 className="mb-3 text-xs font-semibold tracking-wide text-zinc-400">
             OUTPUT
           </h2>
@@ -562,15 +585,23 @@ export default function Home() {
           <p>HIGH: {riskCounts.high}</p>
           <p>MED: {riskCounts.medium}</p>
           <p>LOW: {riskCounts.low}</p>
-          <div className={`mt-2 rounded-lg p-3 font-semibold text-center border shadow-lg ${
-            result?.decision_engine.decision === "do_not_migrate_yet"
-              ? "bg-red-500/10 border-red-500/30 text-red-400"
-              : "bg-amber-500/10 border-amber-500/30 text-amber-400"
-          }`}>
-            {result?.decision_engine.decision === "do_not_migrate_yet"
-              ? "❌ DO NOT MIGRATE YET"
-              : "⚠️ PROCEED WITH CAUTION"}
-          </div>
+          {result ? (
+            <div className={`mt-2 rounded-lg p-3 font-semibold text-center border shadow-lg ${
+              result.decision_engine.decision === "do_not_migrate_yet"
+                ? "bg-red-500/10 border-red-500/30 text-red-400"
+                : "bg-amber-500/10 border-amber-500/30 text-amber-400"
+            }`}>
+              {result.decision_engine.decision === "do_not_migrate_yet" ? (
+                <span className="flex items-center justify-center gap-1.5"><XIcon className="h-4 w-4" /> DO NOT MIGRATE YET</span>
+              ) : (
+                <span className="flex items-center justify-center gap-1.5"><AlertIcon className="h-4 w-4" /> PROCEED WITH CAUTION</span>
+              )}
+            </div>
+          ) : (
+            <div className="mt-2 rounded-lg p-3 font-semibold text-center border border-dashed border-zinc-800 text-zinc-600">
+              Awaiting Analysis
+            </div>
+          )}
           {runtimeError ? (
             <p className="mt-2 rounded bg-[#8d59fe]/20 p-2 text-[#cfbcff]">
               Build failed: {runtimeError}
@@ -651,18 +682,20 @@ export default function Home() {
           ) : null}
 
           {activeTab === "benchmark" ? (
-            <div className="mt-3 h-48">
-              <ResponsiveContainer width="100%" height="100%" minWidth={10} minHeight={10}>
-                <BarChart data={benchmarkData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#3f3f46" />
-                  <XAxis dataKey="name" stroke="#a1a1aa" />
-                  <YAxis stroke="#a1a1aa">
-                    <Label value="ms/iter" angle={-90} position="insideLeft" fill="#a1a1aa" />
-                  </YAxis>
-                  <Tooltip />
-                  <Bar dataKey="value" fill="#8d59fe" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
+            <div className="mt-3">
+              <div className="h-48 w-full">
+                <ResponsiveContainer width="100%" height="100%" minWidth={10} minHeight={10}>
+                  <BarChart data={benchmarkData}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#3f3f46" />
+                    <XAxis dataKey="name" stroke="#a1a1aa" />
+                    <YAxis stroke="#a1a1aa">
+                      <Label value="ms/iter" angle={-90} position="insideLeft" fill="#a1a1aa" />
+                    </YAxis>
+                    <Tooltip />
+                    <Bar dataKey="value" fill="#8d59fe" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
               {result ? (
                 <p className="mt-2 text-xs text-zinc-400">
                   Delta: +{result.benchmark.performance_delta_percent}% |{" "}
@@ -674,36 +707,43 @@ export default function Home() {
 
           {activeTab === "pr" ? (
             <div className="mt-3 glass-card rounded p-3 text-xs border-l-2 border-l-[#8d59fe]">
-              <div className="flex items-center gap-2 mb-2">
-                <span className="bg-[#8d59fe]/20 text-[#cfbcff] px-2 py-0.5 rounded font-mono text-[10px]">Open</span>
-                <p className="font-semibold text-base text-zinc-100">
-                  {result?.pull_request_preview.title ?? "CUDA -> ROCm Migration"} <span className="font-normal text-zinc-500">#{result?.pull_request_preview.pr_number ?? 42}</span>
-                </p>
-              </div>
-              <div className="flex items-center gap-4 text-zinc-400 mb-3 border-b border-zinc-800/50 pb-2">
-                <p>Files changed: <span className="font-medium text-zinc-200">{result?.pull_request_preview.files_changed ?? 12}</span></p>
-                <p>
-                  <span className="text-emerald-400">+{result?.pull_request_preview.lines_added ?? 340}</span>{" "}
-                  <span className="text-red-400">-{result?.pull_request_preview.lines_removed ?? 210}</span>
-                </p>
-              </div>
-              <p className="mt-2 text-zinc-300 font-medium">GitHub PR body:</p>
-              <pre className="mt-2 rounded bg-zinc-950/80 p-3 text-[11px] whitespace-pre-wrap break-words border border-zinc-800/50 text-zinc-300 leading-relaxed">
-                {result?.pull_request_preview.github_pr_body ??
-                  "Run migration to generate PR body"}
-              </pre>
-              {result?.pull_request_preview.real_pr_url ? (
-                <a href={result.pull_request_preview.real_pr_url} target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-1 text-xs text-[#cfbcff] hover:underline">
-                  View Real PR on GitHub <ArrowRightIcon className="h-3 w-3" />
-                </a>
+              {result ? (
+                <>
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="bg-[#8d59fe]/20 text-[#cfbcff] px-2 py-0.5 rounded font-mono text-[10px]">Open</span>
+                    <p className="font-semibold text-base text-zinc-100">
+                      {result.pull_request_preview.title} <span className="font-normal text-zinc-500">#{result.pull_request_preview.pr_number}</span>
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-4 text-zinc-400 mb-3 border-b border-zinc-800/50 pb-2">
+                    <p>Files changed: <span className="font-medium text-zinc-200">{result.pull_request_preview.files_changed}</span></p>
+                    <p>
+                      <span className="text-emerald-400">+{result.pull_request_preview.lines_added}</span>{" "}
+                      <span className="text-red-400">-{result.pull_request_preview.lines_removed}</span>
+                    </p>
+                  </div>
+                  <p className="mt-2 text-zinc-300 font-medium">GitHub PR body:</p>
+                  <pre className="mt-2 rounded bg-zinc-950/80 p-3 text-[11px] whitespace-pre-wrap break-words border border-zinc-800/50 text-zinc-300 leading-relaxed">
+                    {result.pull_request_preview.github_pr_body}
+                  </pre>
+                  {result.pull_request_preview.real_pr_url ? (
+                    <a href={result.pull_request_preview.real_pr_url} target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-1 text-xs text-[#cfbcff] hover:underline">
+                      View Real PR on GitHub <ArrowRightIcon className="h-3 w-3" />
+                    </a>
+                  ) : (
+                    <button
+                      onClick={publishRealPR}
+                      disabled={publishingPR}
+                      className="mt-3 rounded bg-[#8d59fe] px-3 py-1 text-xs font-semibold text-white disabled:opacity-50"
+                    >
+                      {publishingPR ? "Publishing..." : "Publish Real PR to GitHub"}
+                    </button>
+                  )}
+                </>
               ) : (
-                <button
-                  onClick={publishRealPR}
-                  disabled={publishingPR}
-                  className="mt-3 rounded bg-[#8d59fe] px-3 py-1 text-xs font-semibold text-white disabled:opacity-50"
-                >
-                  {publishingPR ? "Publishing..." : "Publish Real PR to GitHub"}
-                </button>
+                <div className="p-4 text-center text-zinc-500">
+                  <p>Run migration to generate Pull Request preview.</p>
+                </div>
               )}
             </div>
           ) : null}
@@ -730,52 +770,70 @@ export default function Home() {
           ) : null}
         </article>
 
-        <article className="glass-panel rounded-xl p-4 relative">
-          <h2 className="mb-3 text-xs font-semibold tracking-wide text-zinc-400">
-            DELTA TRACKING
-          </h2>
-          <div className="flex items-baseline gap-2 mt-1">
-            <span className="text-3xl font-light text-zinc-500">{previousScore ?? "-"}</span>
-            <span className="text-zinc-600 text-xl">→</span>
-            <span className="text-3xl font-semibold text-emerald-400">{result?.migration_score ?? "-"}</span>
-            {result && previousScore && (
-              <span className="ml-2 px-2 py-0.5 rounded-full bg-emerald-400/10 text-emerald-400 text-xs font-bold">
-                +{result.migration_score - previousScore} pts
-              </span>
+        <article className="glass-panel rounded-xl p-4 relative overflow-hidden flex flex-col justify-between">
+          <div>
+            <h2 className="mb-3 text-xs font-semibold tracking-wide text-zinc-400">
+              DELTA TRACKING
+            </h2>
+            <div className="flex items-center gap-2 mt-1">
+              <span className="text-3xl font-light text-zinc-500">{previousScore ?? "-"}</span>
+              <ArrowRightIcon className="h-5 w-5 text-zinc-600" />
+              <span className="text-3xl font-semibold text-emerald-400">{result?.migration_score ?? "-"}</span>
+              {result && previousScore && (
+                <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-bold ${result.migration_score >= previousScore ? 'bg-emerald-400/10 text-emerald-400' : 'bg-red-400/10 text-red-400'}`}>
+                  {result.migration_score >= previousScore ? "+" : ""}{result.migration_score - previousScore} pts
+                </span>
+              )}
+            </div>
+            
+            <div className="mt-5 h-32 w-full">
+              {deltaChartData.length > 0 ? (
+                <ResponsiveContainer width="100%" height="100%" minWidth={10} minHeight={10}>
+                  <AreaChart data={deltaChartData} margin={{ top: 5, right: 0, left: -25, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="scoreGradient" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#10b981" stopOpacity={0.4}/>
+                        <stop offset="95%" stopColor="#10b981" stopOpacity={0}/>
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#27272a" vertical={false} />
+                    <XAxis dataKey="name" stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} />
+                    <YAxis stroke="#52525b" fontSize={10} tickLine={false} axisLine={false} domain={['dataMin - 5', 100]} />
+                    <Tooltip 
+                      contentStyle={{ backgroundColor: '#18181b', border: '1px solid #27272a', borderRadius: '8px', fontSize: '11px', color: '#a1a1aa' }}
+                      itemStyle={{ color: '#10b981', fontWeight: 600 }}
+                      labelStyle={{ color: '#d4d4d8', marginBottom: '4px' }}
+                    />
+                    <Area type="monotone" dataKey="score" stroke="#10b981" strokeWidth={2} fillOpacity={1} fill="url(#scoreGradient)" activeDot={{ r: 4, fill: '#10b981', stroke: '#18181b', strokeWidth: 2 }} />
+                  </AreaChart>
+                </ResponsiveContainer>
+              ) : (
+                <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-zinc-800 bg-zinc-900/30 text-xs text-zinc-600">
+                   Run migrations to build history
+                </div>
+              )}
+            </div>
+          </div>
+          
+          <div className="mt-auto pt-4">
+            {result && (
+              <button
+                onClick={runMigration}
+                className="w-full rounded bg-zinc-800/80 hover:bg-zinc-700 transition-colors px-3 py-2 text-xs font-medium text-zinc-300 border border-zinc-700/50"
+              >
+                Rerun after fixes
+              </button>
+            )}
+            {result ? (
+              <p className="mt-3 text-[10px] text-zinc-500 text-center uppercase tracking-wider">
+                Run #{result.run_id.slice(0, 8)}
+              </p>
+            ) : (
+              <p className="mt-3 text-[10px] text-zinc-500 text-center uppercase tracking-wider">
+                Awaiting executions
+              </p>
             )}
           </div>
-          <p className="mt-2 inline-flex items-center gap-1 text-emerald-300">
-            <CheckIcon />
-            Fixed warpSize issue
-          </p>
-          <p className="inline-flex items-center gap-1 text-emerald-300">
-            <CheckIcon />
-            Fixed cuBLAS mismatch
-          </p>
-          <p className="mt-2 inline-flex items-center gap-1 text-amber-300">
-            <AlertIcon />
-            Remaining dynamic launch
-          </p>
-          <p className="inline-flex items-center gap-1 text-amber-300">
-            <AlertIcon />
-            Remaining cuDNN custom op
-          </p>
-          <button
-            onClick={runMigration}
-            className="mt-3 rounded bg-zinc-800 px-3 py-1 text-xs"
-          >
-            Rerun after fixes
-          </button>
-          {result ? (
-            <p className="mt-3 text-xs text-zinc-500">
-              Run #{result.run_id} ·{" "}
-              {new Date(result.timestamp_utc).toISOString().slice(0, 10)}
-            </p>
-          ) : (
-            <p className="mt-3 text-xs text-zinc-500">
-              Delta appears after first execution
-            </p>
-          )}
         </article>
       </section>
     </main>
