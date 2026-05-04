@@ -421,7 +421,7 @@ export default function Home() {
 
   return (
     <main className="min-h-screen p-4 text-sm text-zinc-100 selection:bg-[#8d59fe]/30">
-      <div className="glass-panel mb-4 rounded-xl p-4 relative overflow-hidden">
+      <div className="glass-panel animate-fade-in mb-4 rounded-xl p-4 relative overflow-hidden">
         <div className="flex items-center justify-between relative z-10">
           <div className="flex items-center gap-2">
             <Image
@@ -445,7 +445,7 @@ export default function Home() {
       </div>
 
       <section className="grid grid-cols-1 gap-4 xl:grid-cols-4">
-        <article className="glass-panel rounded-xl p-4 relative overflow-hidden">
+        <article className="glass-panel animate-slide-up rounded-xl transition-all duration-500 p-4 relative overflow-hidden">
           <h2 className="mb-3 text-xs font-semibold tracking-wide text-zinc-400">
             RECENT ANALYSES
           </h2>
@@ -469,7 +469,7 @@ export default function Home() {
           </div>
         </article>
 
-        <article className="glass-panel rounded-xl p-4 relative overflow-hidden">
+        <article className="glass-panel animate-slide-up rounded-xl transition-all duration-500 p-4 relative overflow-hidden">
           <h2 className="mb-3 text-xs font-semibold tracking-wide text-zinc-400">
             PIPELINE
           </h2>
@@ -601,7 +601,7 @@ export default function Home() {
           </div>
         </article>
 
-        <article className="glass-panel rounded-xl p-4 relative overflow-hidden">
+        <article className="glass-panel animate-slide-up rounded-xl transition-all duration-500 p-4 relative overflow-hidden">
           <h2 className="mb-3 text-xs font-semibold tracking-wide text-zinc-400">
             OUTPUT
           </h2>
@@ -826,7 +826,7 @@ export default function Home() {
           ) : null}
         </article>
 
-        <article className="glass-panel rounded-xl p-4 relative overflow-hidden flex flex-col justify-between">
+        <article className="glass-panel animate-slide-up rounded-xl transition-all duration-500 p-4 relative overflow-hidden flex flex-col justify-between">
           <div>
             <h2 className="mb-3 text-xs font-semibold tracking-wide text-zinc-400">
               DELTA TRACKING
