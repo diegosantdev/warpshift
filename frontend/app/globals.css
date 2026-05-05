@@ -20,15 +20,15 @@
 body {
   background: var(--background);
   background-image: 
-    radial-gradient(at 0% 0%, rgba(141, 89, 254, 0.15) 0px, transparent 50%),
-    radial-gradient(at 100% 100%, rgba(30, 30, 40, 0.8) 0px, transparent 50%);
-  background-attachment: fixed;
+    radial-gradient(ellipse 80% 50% at 0% 0%, rgba(141, 89, 254, 0.12) 0px, transparent 60%),
+    radial-gradient(ellipse 60% 40% at 100% 100%, rgba(30, 30, 40, 0.6) 0px, transparent 60%);
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
   color: var(--foreground);
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
   min-height: 100vh;
 }
 
-/* Glassmorphism utilities */
 .glass-panel {
   background: var(--glass-bg);
   backdrop-filter: blur(12px);
@@ -50,7 +50,6 @@ body {
   transform: translateY(-1px);
 }
 
-/* Diff viewer styles */
 .diff-line {
   padding: 0 4px;
   border-radius: 2px;
@@ -67,7 +66,6 @@ body {
   color: #fca5a5;
 }
 
-/* Animations */
 @keyframes pulse-ring {
   0% {
     transform: scale(0.8);
@@ -126,7 +124,6 @@ body {
   animation: fade-in 0.5s ease-out forwards;
 }
 
-/* Scrollbar styling */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
