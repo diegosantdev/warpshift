@@ -19,11 +19,6 @@
 
 body {
   background: var(--background);
-  background-image: 
-    radial-gradient(ellipse 80% 50% at 0% 0%, rgba(141, 89, 254, 0.12) 0px, transparent 60%),
-    radial-gradient(ellipse 60% 40% at 100% 100%, rgba(30, 30, 40, 0.6) 0px, transparent 60%);
-  background-repeat: no-repeat;
-  background-size: 100% 100%;
   color: var(--foreground);
   font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
   min-height: 100vh;
