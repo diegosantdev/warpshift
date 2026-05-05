@@ -14,7 +14,7 @@
 [![Next.js](https://img.shields.io/badge/Next.js-15-black?style=for-the-badge&logo=next.js)](https://nextjs.org/)
 [![Gemini](https://img.shields.io/badge/Google-Gemini%202.5%20Flash-4285F4?style=for-the-badge&logo=google)](https://ai.google.dev/)
 
-![WarpShift AI Agent — full pipeline](frontend/public/assets/home.png)
+![WarpShift AI Agent — full pipeline](frontend/public/assets/home.png?v=2)
 [![Docker](https://img.shields.io/badge/Docker-Sandbox-2496ED?style=for-the-badge&logo=docker)](https://www.docker.com/)
 [![License](https://img.shields.io/badge/License-MIT-purple?style=for-the-badge)](LICENSE)
 
@@ -52,7 +52,7 @@ Git Repository URL  -->  [4-Stage Pipeline]  -->  Migration Decision + Proof
 | **3. Runtime Validation** | Compiles with `hipcc`, runs the binary, validates numerical output | Build status + ms/iter timing |
 | **4. Agent Reasoning Layer** | Gemini 2.5 Flash detects what HIPIFY missed, writes the fixes, and generates the PR reasoning | Actionable insights per issue |
 
-![4-stage pipeline: HIPIFY + Gemini + MI300X validation](frontend/public/assets/stages.gif)
+![4-stage pipeline: HIPIFY + Gemini + MI300X validation](frontend/public/assets/stages.gif?v=2)
 
 **Final output:** `PROCEED` or `DO NOT MIGRATE YET` with full evidence.
 
@@ -281,7 +281,7 @@ source.addEventListener('completed', (e) => console.log('Done!', JSON.parse(e.da
 5. Open the SAXPY Benchmark tab and show numerical validation status and ms/iter timing
 6. Show the Decision Banner: `PROCEED WITH CAUTION` or `DO NOT MIGRATE YET`
 
-![5.5x faster on AMD MI300X vs CUDA V100](frontend/public/assets/cpu.png)
+![5.5x faster on AMD MI300X vs CUDA V100](frontend/public/assets/cpu.png?v=2)
 
 Total elapsed: **under 90 seconds.** Full end-to-end migration decision with proof.
 
@@ -289,7 +289,7 @@ Total elapsed: **under 90 seconds.** Full end-to-end migration decision with pro
 
 ## Detected Risk Patterns
 
-![Gemini detects what HIPIFY misses — hardcoded warpSize rewritten automatically](frontend/public/assets/diff.png)
+![Gemini detects what HIPIFY misses — hardcoded warpSize rewritten automatically](frontend/public/assets/diff.png?v=2)
 
 WarpShift's static analysis engine scans for:
 
