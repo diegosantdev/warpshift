@@ -208,7 +208,7 @@ export default function Home() {
     if (!result) return;
     setPublishingPR(true);
     try {
-      const response = await fetch(`http://134.199.200.190:8000/runs/${result.run_id}/create-pr`, { method: "POST" });
+      const response = await fetch(`/api/runs/${result.run_id}/create-pr`, { method: "POST" });
       const data = await response.json();
       if (data.status === "ok") {
         setResult((prev) => prev ? {
@@ -234,7 +234,7 @@ export default function Home() {
   };
 
   const loadHistory = async () => {
-    const response = await fetch("http://134.199.200.190:8000/history");
+    const response = await fetch("/api/history");
     const payload = (await response.json()) as { items: HistoryItem[] };
     if (payload.items?.length) {
       setHistory(payload.items);
@@ -243,7 +243,7 @@ export default function Home() {
 
   useEffect(() => {
     loadHistory().catch(() => null);
-    fetch("http://134.199.200.190:8000/demo-repos")
+    fetch("/api/demo-repos")
       .then((r) => r.json())
       .then((d: { items: string[] }) => setDemoRepos(d.items || []))
       .catch(() => null);
@@ -311,7 +311,7 @@ export default function Home() {
       githubUrl.startsWith("http://") || githubUrl.startsWith("https://")
         ? githubUrl
         : fallbackRepo;
-    const url = new URL("http://134.199.200.190:8000/analyze/stream");
+    const url = new URL("/api/analyze/stream", window.location.origin);
     url.searchParams.set("github_url", effectiveUrl);
     url.searchParams.set("mode", mode);
 
@@ -348,7 +348,7 @@ export default function Home() {
       setResult(payload);
       setRunning(false);
       loadHistory().catch(() => null);
-      fetch(`http://134.199.200.190:8000/runs/${payload.run_id}`)
+      fetch(`/api/runs/${payload.run_id}`)
         .then((r) => r.json())
         .then((d: { evidence: unknown }) =>
           setRunEvidence(JSON.stringify(d.evidence, null, 2)),
@@ -667,7 +667,7 @@ export default function Home() {
           {/* ── Download Converted Code ── */}
           {result?.has_converted_code && (
             <a
-              href={`http://134.199.200.190:8000/runs/${result.run_id}/download`}
+              href={`/api/runs/${result.run_id}/download`}
               target="_blank"
               rel="noreferrer"
               className="mt-3 flex items-center justify-center gap-2 rounded-lg bg-[#8d59fe] hover:bg-[#7a48ef] transition-colors px-4 py-2.5 text-sm font-bold text-white"
