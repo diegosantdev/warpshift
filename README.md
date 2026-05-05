@@ -12,6 +12,9 @@
 [![MI300X Ready](https://img.shields.io/badge/MI300X-Ready-00C7B7?style=for-the-badge)](https://www.amd.com/en/products/accelerators/instinct/mi300/mi300x.html)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.111-009688?style=for-the-badge&logo=fastapi)](https://fastapi.tiangolo.com/)
 [![Next.js](https://img.shields.io/badge/Next.js-15-black?style=for-the-badge&logo=next.js)](https://nextjs.org/)
+[![Gemini](https://img.shields.io/badge/Google-Gemini%202.5%20Flash-4285F4?style=for-the-badge&logo=google)](https://ai.google.dev/)
+
+![WarpShift AI Agent — full pipeline](frontend/public/assets/home.png)
 [![Docker](https://img.shields.io/badge/Docker-Sandbox-2496ED?style=for-the-badge&logo=docker)](https://www.docker.com/)
 [![License](https://img.shields.io/badge/License-MIT-purple?style=for-the-badge)](LICENSE)
 
@@ -47,7 +50,9 @@ Git Repository URL  -->  [4-Stage Pipeline]  -->  Migration Decision + Proof
 | **1. HIPIFY Conversion** | Runs `hipify-clang` or `hipify-perl` on all `.cu` / `.cuh` files | Converted HIP source + diff |
 | **2. Static Analysis** | Scans for 15+ known CUDA to ROCm incompatibility patterns | Risk report (HIGH / MED / LOW) |
 | **3. Runtime Validation** | Compiles with `hipcc`, runs the binary, validates numerical output | Build status + ms/iter timing |
-| **4. AI Explanation Layer** | LLM generates targeted fix guidance per detected risk | Actionable insights per issue |
+| **4. Agent Reasoning Layer** | Gemini 2.5 Flash detects what HIPIFY missed, writes the fixes, and generates the PR reasoning | Actionable insights per issue |
+
+![4-stage pipeline: HIPIFY + Gemini + MI300X validation](frontend/public/assets/stages.gif)
 
 **Final output:** `PROCEED` or `DO NOT MIGRATE YET` with full evidence.
 
@@ -73,10 +78,8 @@ cd warpshift
 Create a `.env` file in the project root:
 
 ```env
-# LLM Integration (supports any OpenAI-compatible endpoint)
-MIGRATEAI_LLM_API_KEY=your_api_key_here
-MIGRATEAI_VLLM_URL=https://api.groq.com/openai/v1/chat/completions
-MIGRATEAI_VLLM_MODEL=llama3-8b-8192
+GOOGLE_AI_API_KEY=your_google_ai_key_here
+# Get your key at: aistudio.google.com
 
 # Execution Mode
 MIGRATEAI_BACKEND_MODE=real        # "mock" for safe demo, "real" for full pipeline
@@ -272,18 +275,21 @@ source.addEventListener('completed', (e) => console.log('Done!', JSON.parse(e.da
 > Perfect for a live 2-minute demonstration.
 
 1. Open `http://localhost:3000`
-2. Paste `https://github.com/NVIDIA/cuda-samples` in the URL field
+2. Paste `https://github.com/NVIDIA/cuda-samples/tree/master/Samples/0_Introduction/matrixMul` in the URL field
 3. Click `MIGRATE` and watch the 4 stages run in real time (20 to 35 seconds)
 4. Open the Risk Report tab and point out HIGH risks with their detection sources
 5. Open the SAXPY Benchmark tab and show numerical validation status and ms/iter timing
 6. Show the Decision Banner: `PROCEED WITH CAUTION` or `DO NOT MIGRATE YET`
-7. Click `Publish Real PR to GitHub` and watch the real GitHub PR open in the browser
+
+![5.5x faster on AMD MI300X vs CUDA V100](frontend/public/assets/cpu.png)
 
 Total elapsed: **under 90 seconds.** Full end-to-end migration decision with proof.
 
 ---
 
 ## Detected Risk Patterns
+
+![Gemini detects what HIPIFY misses — hardcoded warpSize rewritten automatically](frontend/public/assets/diff.png)
 
 WarpShift's static analysis engine scans for:
 
